@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Smart Attendance - Authenticate</title>
+    <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+    <div class="container">
+        <div class="card form-container">
+            <h1>Authenticate</h1>
+            <p>Please enter your credentials to log in.</p>
+            {% with messages = get_flashed_messages(with_categories=true) %}
+                {% if messages %}
+                    <ul class="flash-messages">
+                        {% for category, message in messages %}
+                            <li class="{{ category }}">{{ message }}</li>
+                        {% endfor %}
+                    </ul>
+                {% endif %}
+            {% endwith %}
+            <!-- Login Form -->
+            <form method="POST" action="/authenticate">
+                <input type="text" name="username" placeholder="Enter Username" required>
+                <input type="password" name="password" placeholder="Enter Password" required>
+                <select name="role" required>
+                    <option value="" disabled selected>Select Role</option>
+                    <option value="Teacher">Teacher</option>
+                    <option value="Student">Student</option>
+                </select>
+                <button type="submit" class="btn">Login</button>
+            </form>
+            <!-- Illustration Image -->
+            <div class="illustration">
+                <img src="/static/authenticate_illustration.png" alt="Authenticate Illustration">
+            </div>
+        </div>
+    </div>
+</body>
+</html>

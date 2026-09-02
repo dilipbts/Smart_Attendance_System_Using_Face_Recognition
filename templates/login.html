@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Smart Attendance - Role Selection</title>
+    <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+    <div class="container role-selection-page">
+        <div class="card">
+            <h1>Login</h1>
+            <p>Select your role and enter your credentials to sign in.</p>
+            {% with messages = get_flashed_messages(with_categories=true) %}
+                {% if messages %}
+                    <ul class="flash-messages">
+                        {% for category, message in messages %}
+                            <li class="{{ category }}">{{ message }}</li>
+                        {% endfor %}
+                    </ul>
+                {% endif %}
+            {% endwith %}
+            <form method="POST" action="/authenticate">
+                <div class="radio-buttons">
+                    <label>
+                        <input type="radio" name="role" value="Teacher" required>
+                        Teacher
+                    </label>
+                    <label>
+                        <input type="radio" name="role" value="Student" required>
+                        Student
+                    </label>
+                </div>
+                <input type="text" name="username" placeholder="Enter Username" required>
+                <input type="password" name="password" placeholder="Enter Password" required>
+                <button type="submit" class="btn">Sign In</button>
+            </form>
+            <div class="illustration">
+                <img src="/static/role_selection_illustration.png" alt="Role Selection Illustration">
+            </div>
+        </div>
+    </div>
+</body>
+</html>

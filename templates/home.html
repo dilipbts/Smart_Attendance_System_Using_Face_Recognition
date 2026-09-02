@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Smart Attendance - Dashboard</title>
+    <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+    <div class="container dashboard-page">
+        <header>
+            <h1>Dashboard</h1>
+            <p>Welcome, {{ session.username }} ({{ session.role }})</p>
+            <a href="{{ url_for('logout') }}" class="btn logout-btn">Logout</a>
+        </header>
+        <div class="card">
+            <h2>Attendance Logs</h2>
+            {% with messages = get_flashed_messages(with_categories=true) %}
+                {% if messages %}
+                    <ul class="flash-messages">
+                        {% for category, message in messages %}
+                            <li class="{{ category }}">{{ message }}</li>
+                        {% endfor %}
+                    </ul>
+                {% endif %}
+            {% endwith %}
+            <ul class="logs-list">
+                {% for log in logs %}
+                    <li>
+                        <a href="{{ url_for('view_log', log_file=log) }}" class="btn view-btn">View Log</a>
+                    </li>
+                {% endfor %}
+            </ul>
+            <div class="illustration">
+                <img src="/static/dashboard_illustration.png" alt="Dashboard Illustration">
+            </div>
+        </div>
+    </div>
+</body>
+</html>

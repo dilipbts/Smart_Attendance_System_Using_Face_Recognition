@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Attendance Log Viewer</title>
+    <link rel="stylesheet" href="/static/styles.css">
+    <script>
+        // Function to filter table rows based on search input
+        function searchLog() {
+            const input = document.getElementById('searchInput').value.toLowerCase();
+            const rows = document.querySelectorAll('.log-table tbody tr');
+            rows.forEach(row => {
+                const cells = Array.from(row.querySelectorAll('td'));
+                const match = cells.some(cell => cell.textContent.toLowerCase().includes(input));
+                row.style.display = match ? '' : 'none'; // Show row if match is found, otherwise hide
+            });
+        }
+    </script>
+</head>
+<body>
+    <div class="container log-viewer-page">
+        <div class="card">
+            <h1>Attendance Log: {{ log_file }}</h1>
+            <div class="search-bar">
+                <input 
+                    type="text" 
+                    id="searchInput" 
+                    placeholder="Search logs..." 
+                    onkeyup="searchLog()" 
+                    class="search-input"
+                >
+            </div>
+            <table class="log-table">
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>Date</th>
+                        <th>Time</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for line in log_content %}
+                        {% set entry = line.split(',') %}
+                        <tr>
+                            <td>{{ entry[0].strip() }}</td>
+                            <td>{{ entry[2].strip() }}</td>
+                            <td>{{ entry[1].strip() }}</td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            <a href="{{ url_for('dashboard') }}" class="btn back-btn">Back to Dashboard</a>
+        </div>
+    </div>
+</body>
+</html>

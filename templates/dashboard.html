@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Smart Attendance - Dashboard</title>
+    <link rel="stylesheet" href="/static/styles.css">
+    <script>
+        // Function to search attendance logs dynamically
+        function searchLogs() {
+            const input = document.getElementById('searchInput').value.toLowerCase();
+            const rows = document.querySelectorAll('.log-table tbody tr');
+            rows.forEach(row => {
+                const cells = Array.from(row.querySelectorAll('td'));
+                const match = cells.some(cell => cell.textContent.toLowerCase().includes(input));
+                row.style.display = match ? '' : 'none';
+            });
+        }
+
+        // Function to start webcam and attendance marking
+        function startWebcam() {
+            fetch('/start_webcam', { method: 'POST' })
+                .then(response => response.json())
+                .then(data => {
+                    document.getElementById('attendance-status').textContent = data.message;
+                    if (data.message.includes("successfully")) {
+                        document.getElementById('webcam-frame').src = '/webcam_feed'; // Start webcam feed
+                    }
+                })
+                .catch(error => {
+                    console.error('Error starting webcam:', error);
+                    document.getElementById('attendance-status').textContent = "Error starting webcam.";
+                });
+        }
+
+        // Function to stop webcam
+        function stopWebcam() {
+            fetch('/stop_webcam', { method: 'POST' })
+                .then(response => response.json())
+                .then(data => {
+                    document.getElementById('attendance-status').textContent = data.message;
+                    if (data.message.includes("successfully")) {
+                        document.getElementById('webcam-frame').src = ''; // Stop webcam feed
+                        document.getElementById('recognized-name').textContent = 'No person detected'; // Clear recognized name
+                    }
+                })
+                .catch(error => {
+                    console.error('Error stopping webcam:', error);
+                    document.getElementById('attendance-status').textContent = "Error stopping webcam.";
+                });
+        }
+
+        // Function to fetch the recognized name dynamically
+        function fetchRecognizedName() {
+            fetch('/get_recognized_name', { method: 'GET' })
+                .then(response => response.json())
+                .then(data => {
+                    document.getElementById('recognized-name').textContent = `Recognized Person: ${data.name || 'No person detected'}`;
+                })
+                .catch(error => {
+                    console.error('Error fetching recognized name:', error);
+                });
+        }
+
+        // Set an interval to periodically update the recognized name
+        setInterval(fetchRecognizedName, 2000); // Update every 2 seconds
+    </script>
+</head>
+<body>
+    <div class="container dashboard-page">
+        <header style="position: absolute; top: 0; left: 0; margin: 10px; width: 100%; text-align: left;">
+            <h1 style="margin: 0; display: inline-block;">Welcome, {{ session.username }} ({{ session.role }})</h1>
+            <a href="{{ url_for('logout') }}" class="btn logout-btn" style="float: right; margin-left: 20px;">Logout</a>
+        </header>
+        <div class="main-content" style="margin-top: 60px; display: flex; justify-content: flex-end; gap: 20px;">
+            <!-- Attendance Logs Section -->
+            <div class="card logs-section" style="flex: 5; text-align: left;">
+                <h2>Attendance Logs</h2>
+                <div class="search-bar">
+                    <input 
+                        type="text" 
+                        id="searchInput" 
+                        placeholder="Search logs..." 
+                        onkeyup="searchLogs()" 
+                        class="search-input"
+                    >
+                </div>
+                <table class="log-table">
+                    <thead>
+                        <tr>
+                            <th>Log Name</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% if logs %}
+                            {% for log in logs %}
+                            <tr>
+                                <td>{{ log }}</td>
+                                <td>
+                                    <a href="{{ url_for('view_log', log_file=log) }}" class="btn view-btn">View</a>
+                                    <a href="/static/Attendance Logs/{{ log }}" download class="btn download-btn">Download</a>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        {% else %}
+                            <tr>
+                                <td colspan="2">No attendance logs available.</td>
+                            </tr>
+                        {% endif %}
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Webcam and Buttons Section -->
+            {% if session.role == 'Teacher' %}
+            <div class="cam-section" style="flex: 4; text-align: right;">
+                <!-- Webcam live feed -->
+                <h2>Live Camera Feed</h2>
+                <iframe 
+                    id="webcam-frame" 
+                    style="border: 2px solid #ddd; width: 120%; height: 450px;" 
+                    allow="camera; autoplay">
+                </iframe>
+                <!-- Recognized person's name -->
+                <div id="recognized-name" class="recognized-section" style="margin-top: 10px;">
+                    <h3>Recognized Person:</h3>
+                    <p>No person detected</p>
+                </div>
+                <!-- Status -->
+                <p id="attendance-status" style="margin-top: 10px; color: #fff;"></p>
+                <!-- Buttons aligned below the webcam -->
+                <button class="btn start-attendance-btn" style="margin-top: 10px; display: block;" onclick="startWebcam()">Start Attendance</button>
+                <button class="btn stop-attendance-btn" style="margin-top: 10px; display: block;" onclick="stopWebcam()">Stop Attendance</button>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+</body>
+</html>
