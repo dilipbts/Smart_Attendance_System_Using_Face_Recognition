@@ -63,14 +63,36 @@ recognizer = cv2.FaceRecognizerSF.create(
     config=''
 )
 
-# Calibrated Liveness Filter
+# Multi-Capped Liveness Engine
 def check_liveness(img_bgr, face_data):
+    """
+    Multi-Capped Liveness Engine:
+    1. Detects phone bezels and sharp edges around screen perimeters.
+    2. Enforces upper and lower bounds on sharpness to reject high-PPI screens and blur.
+    3. Traps screen backlight hot-spots and unnatural color plane saturation.
+    4. Validates 3D landmark proportions.
+    """
     h, w, _ = img_bgr.shape
     fx, fy, fw, fh = face_data[0:4].astype(int)
 
-    if fw < 45 or fh < 45:
+    if fw < 50 or fh < 50:
         return False
 
+    # 1. Expanded Crop Check (Finds phone bezels, display rims, and rectangular borders)
+    pad_x = int(fw * 0.25)
+    pad_y = int(fh * 0.25)
+    bx1, by1 = max(0, fx - pad_x), max(0, fy - pad_y)
+    bx2, by2 = min(w, fx + fw + pad_x), min(h, fy + fh + pad_y)
+    outer_crop = img_bgr[by1:by2, bx1:bx2]
+
+    if outer_crop.size > 0:
+        outer_gray = cv2.cvtColor(outer_crop, cv2.COLOR_BGR2GRAY)
+        edges = cv2.Canny(outer_gray, 80, 200)
+        edge_density = np.sum(edges > 0) / outer_crop.size
+        if edge_density > 0.08:
+            return False
+
+    # 2. Tight Face Crop
     x1, y1 = max(0, fx), max(0, fy)
     x2, y2 = min(w, fx + fw), min(h, fy + fh)
     face_crop = img_bgr[y1:y2, x1:x2]
@@ -78,25 +100,32 @@ def check_liveness(img_bgr, face_data):
     if face_crop.size == 0:
         return False
 
-    # 1. Texture Sharpness
+    # 3. Double-Capped Texture Sharpness (Laplacian Variance)
     gray_crop = cv2.cvtColor(face_crop, cv2.COLOR_BGR2GRAY)
     laplacian_var = cv2.Laplacian(gray_crop, cv2.CV_64F).var()
-    if laplacian_var < 18.0:
+    if laplacian_var < 20.0 or laplacian_var > 380.0:
         return False
 
-    # 2. Chrominance Distribution
+    # 4. Screen Backlight Glare and Saturation Plane
+    hsv = cv2.cvtColor(face_crop, cv2.COLOR_BGR2HSV)
+    sat = hsv[:, :, 1]
+    val = hsv[:, :, 2]
+    if np.mean(val) > 235 or np.std(sat) < 5.0:
+        return False
+
+    # 5. Chrominance Variance
     ycrcb = cv2.cvtColor(face_crop, cv2.COLOR_BGR2YCrCb)
     cr = ycrcb[:, :, 1]
     cb = ycrcb[:, :, 2]
-    if np.std(cr) < 1.8 or np.std(cb) < 1.8:
+    if np.std(cr) < 2.2 or np.std(cb) < 2.2:
         return False
 
-    # 3. Geometric Landmark Plausibility
+    # 6. 5-Point Landmark Geometry Plausibility
     landmarks = face_data[4:14].reshape((5, 2))
     re, le, nose, rcm, lcm = landmarks
 
     eye_dist = np.linalg.norm(re - le)
-    if eye_dist <= 0 or (eye_dist / fw) < 0.16 or (eye_dist / fw) > 0.75:
+    if eye_dist <= 0 or (eye_dist / fw) < 0.18 or (eye_dist / fw) > 0.68:
         return False
 
     mid_eyes = (re + le) / 2.0
@@ -104,12 +133,12 @@ def check_liveness(img_bgr, face_data):
     upper_face = np.linalg.norm(mid_eyes - nose)
     lower_face = np.linalg.norm(nose - mid_mouth)
 
-    if lower_face == 0 or (upper_face / lower_face) < 0.20 or (upper_face / lower_face) > 3.2:
+    if lower_face == 0 or (upper_face / lower_face) < 0.28 or (upper_face / lower_face) > 2.9:
         return False
 
     return True
 
-# Database Models for Persistent Storage
+# Database Models
 class User(db.Model):
     __tablename__ = 'users'
     id = db.Column(db.Integer, primary_key=True)
@@ -133,7 +162,7 @@ class SpoofRecord(db.Model):
     date = db.Column(db.String(20), nullable=False)
     status = db.Column(db.String(50), default="FRAUD_ATTEMPT_DETECTED")
 
-# Load Known Faces
+# Load Known Faces from Directory
 KNOWN_FACES_DIR = os.path.join(os.getcwd(), 'Images_Attendance')
 known_features = []
 class_names = []
@@ -149,7 +178,7 @@ def extract_feature_from_image(img_bgr):
     return None
 
 if os.path.exists(KNOWN_FACES_DIR):
-    for img_name in os.listdir(KNOWN_FACES_DIR):
+    for img_name in sorted(os.listdir(KNOWN_FACES_DIR)):
         img_path = os.path.join(KNOWN_FACES_DIR, img_name)
         img = cv2.imread(img_path)
         if img is not None:
@@ -157,8 +186,9 @@ if os.path.exists(KNOWN_FACES_DIR):
             if feat is not None:
                 known_features.append(feat)
                 class_names.append(os.path.splitext(img_name)[0].upper())
+                print(f"[REGISTERED] Mapped face feature for: {os.path.splitext(img_name)[0].upper()}")
 
-# Database Logging Helpers
+# Database Helpers
 def mark_attendance(name):
     now = datetime.now(IST)
     d_string = now.strftime('%d/%m/%Y')
@@ -217,7 +247,6 @@ def authenticate():
             flash("All fields are required.", "danger")
             return redirect(url_for('authenticate'))
         
-        # Case-insensitive role comparison for smooth login
         user = User.query.filter(
             User.username == username,
             db.func.lower(User.role) == role.lower()
@@ -379,11 +408,11 @@ def logout():
     flash("Logged out successfully.", "info")
     return redirect(url_for('authenticate'))
 
-# Database initialization and default user seeding
+# Database initialization and user credential seeding
 with app.app_context():
     db.create_all()
 
-    # 1. Seed Teacher (Guru)
+    # 1. Teacher Account
     teacher = User.query.filter_by(username='Guru').first()
     if not teacher:
         hashed_teacher_pw = bcrypt.generate_password_hash('1234').decode('utf-8')
@@ -397,7 +426,7 @@ with app.app_context():
         teacher.password = bcrypt.generate_password_hash('1234').decode('utf-8')
         teacher.role = 'Teacher'
 
-    # 2. Seed Student (Dilip DK)
+    # 2. Student Account
     student = User.query.filter_by(username='Dilip DK').first()
     if not student:
         hashed_student_pw = bcrypt.generate_password_hash('demonking').decode('utf-8')
