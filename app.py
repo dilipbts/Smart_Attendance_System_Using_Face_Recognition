@@ -240,8 +240,9 @@ def view_log(log_file):
 @app.route('/process_frame', methods=['POST'])
 def process_frame():
     now_ist = datetime.now(IST)
-    if now_ist.hour < 9 or now_ist.hour > 17:
-        return jsonify({'status': 'error', 'message': 'Attendance allowed only between 9:00 AM and 11:50 PM IST.'})
+    # Time restriction: 00:00 AM to 11:50 PM IST
+    if now_ist.hour == 23 and now_ist.minute > 50:
+        return jsonify({'status': 'error', 'message': 'Attendance portal closed between 11:50 PM and 12:00 AM IST.'})
 
     data = request.get_json(silent=True)
     if not data or 'image' not in data:
