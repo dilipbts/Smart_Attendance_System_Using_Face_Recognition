@@ -1,5 +1,6 @@
 import os
 import base64
+import urllib.request
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from flask import Flask, render_template, request, redirect, url_for, session, flash, jsonify
@@ -25,7 +26,22 @@ IST = ZoneInfo("Asia/Kolkata")
 YUNET_MODEL = os.path.join(os.getcwd(), 'face_detection_yunet_2023mar.onnx')
 SFACE_MODEL = os.path.join(os.getcwd(), 'face_recognition_sface_2021dec.onnx')
 
-# Initialize Deep Learning Models
+# Automatic fallback download if run outside Docker
+if not os.path.exists(YUNET_MODEL):
+    print("[DOWNLOADING] YuNet face detection model...")
+    urllib.request.urlretrieve(
+        "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx",
+        YUNET_MODEL
+    )
+
+if not os.path.exists(SFACE_MODEL):
+    print("[DOWNLOADING] SFace face recognition model...")
+    urllib.request.urlretrieve(
+        "https://github.com/opencv/opencv_zoo/raw/main/models/face_recognition_sface/face_recognition_sface_2021dec.onnx",
+        SFACE_MODEL
+    )
+
+# Initialize OpenCV DNN models
 detector = cv2.FaceDetectorYN.create(
     model=YUNET_MODEL,
     config='',
@@ -50,7 +66,6 @@ def extract_feature_from_image(img_bgr):
     detector.setInputSize((w, h))
     _, faces = detector.detect(img_bgr)
     if faces is not None and len(faces) > 0:
-        # Align face using 5 facial landmarks and extract deep feature vector
         aligned_face = recognizer.alignCrop(img_bgr, faces[0])
         feature = recognizer.feature(aligned_face)
         return feature
@@ -67,9 +82,9 @@ if os.path.exists(KNOWN_FACES_DIR):
                 class_names.append(os.path.splitext(img_name)[0].upper())
                 print(f"[LOADED] Feature vector mapped for: {os.path.splitext(img_name)[0].upper()}")
             else:
-                print(f"[WARNING] No face detected in image: {img_name}")
+                print(f"[WARNING] No face detected in: {img_name}")
 
-# Attendance Utilities
+# Attendance Logging Utilities
 def get_attendance_filename():
     folder_path = os.path.join('static', 'Attendance Logs')
     if not os.path.exists(folder_path):
@@ -180,7 +195,7 @@ def process_frame():
     display_width = data.get('displayWidth', 480)
     display_height = data.get('displayHeight', 360)
 
-    # Decode base64 frame from browser
+    # Decode base64 frame
     encoded_data = data['image'].split(',')[1]
     nparr = np.frombuffer(base64.b64decode(encoded_data), np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
@@ -189,7 +204,7 @@ def process_frame():
     scale_x = display_width / w
     scale_y = display_height / h
 
-    # Run YuNet face detection
+    # Detect faces via YuNet
     detector.setInputSize((w, h))
     _, faces = detector.detect(img)
 
@@ -206,11 +221,9 @@ def process_frame():
     marked = False
 
     for face in faces:
-        # YuNet outputs: [x, y, w, h, x_re, y_re, x_le, y_le, x_nt, y_nt, x_rcm, y_rcm, x_lcm, y_lcm, score]
-        box = face[0:4].astype(int)
-        fx, fy, fw, fh = box
+        fx, fy, fw, fh = face[0:4].astype(int)
 
-        # Align and extract deep feature vector
+        # Align face and compute 128-d deep embedding
         aligned_face = recognizer.alignCrop(img, face)
         live_feature = recognizer.feature(aligned_face)
 
@@ -218,21 +231,21 @@ def process_frame():
         best_score = -1.0
         best_idx = -1
 
-        # Match against known feature vectors using Cosine Similarity
+        # Match against known feature vectors via Cosine Similarity
         for idx, k_feat in enumerate(known_features):
             score = recognizer.match(k_feat, live_feature, cv2.FaceRecognizerSF_FR_COSINE)
             if score > best_score:
                 best_score = score
                 best_idx = idx
 
-        # SFace standard cosine similarity threshold is 0.363
+        # Standard SFace cosine similarity match threshold
         if best_idx != -1 and best_score >= 0.363:
             name = class_names[best_idx]
             recognized_person = name
             if not is_already_registered_this_hour(name):
                 marked = mark_attendance(name)
 
-        # Scale detection coordinates to display canvas format: [top, right, bottom, left]
+        # Map bounding box back to browser display dimensions
         top = int(fy * scale_y)
         left = int(fx * scale_x)
         bottom = int((fy + fh) * scale_y)
