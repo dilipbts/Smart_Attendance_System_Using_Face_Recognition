@@ -17,7 +17,8 @@
         }
 
         let stream = null;
-        let captureInterval = null;
+        let isScanning = false;
+        let isProcessing = false;
 
         async function startWebcam() {
             const video = document.getElementById('webcam-video');
@@ -25,13 +26,13 @@
 
             try {
                 stream = await navigator.mediaDevices.getUserMedia({ 
-                    video: { width: { ideal: 640 }, height: { ideal: 480 } } 
+                    video: { width: { ideal: 480 }, height: { ideal: 360 } } 
                 });
                 video.srcObject = stream;
                 statusEl.textContent = "Webcam active. Scanning faces...";
+                isScanning = true;
                 
-                // Process frame every 1.2 seconds
-                captureInterval = setInterval(sendFrameToBackend, 1200);
+                requestAnimationFrame(processingLoop);
             } catch (err) {
                 console.error("Camera access error:", err);
                 statusEl.textContent = "Failed to access webcam. Please allow camera permissions.";
@@ -39,10 +40,8 @@
         }
 
         function stopWebcam() {
-            if (captureInterval) {
-                clearInterval(captureInterval);
-                captureInterval = null;
-            }
+            isScanning = false;
+            isProcessing = false;
 
             if (stream) {
                 stream.getTracks().forEach(track => track.stop());
@@ -60,32 +59,56 @@
             document.getElementById('recognized-name').textContent = "Recognized Person: No person detected";
         }
 
-        function sendFrameToBackend() {
+        async function processingLoop() {
+            if (!isScanning) return;
+
+            if (!isProcessing) {
+                await sendFrameToBackend();
+            }
+
+            // Pause between frames to keep CPU usage low
+            setTimeout(() => {
+                if (isScanning) requestAnimationFrame(processingLoop);
+            }, 600);
+        }
+
+        async function sendFrameToBackend() {
             const video = document.getElementById('webcam-video');
             const snapCanvas = document.getElementById('snapshot-canvas');
             const overlay = document.getElementById('overlay-canvas');
 
-            if (!video.videoWidth) return;
+            if (!video.videoWidth || video.clientWidth === 0) return;
 
             const snapCtx = snapCanvas.getContext('2d');
             const overlayCtx = overlay.getContext('2d');
 
-            snapCanvas.width = video.videoWidth;
-            snapCanvas.height = video.videoHeight;
-            overlay.width = video.videoWidth;
-            overlay.height = video.videoHeight;
+            // Match overlay canvas to rendered video size
+            overlay.width = video.clientWidth;
+            overlay.height = video.clientHeight;
 
-            // Draw current frame to offscreen canvas
-            snapCtx.drawImage(video, 0, 0, snapCanvas.width, snapCanvas.height);
-            const base64Image = snapCanvas.toDataURL('image/jpeg', 0.6);
+            // Downscale frame to 320px width before upload to cut latency
+            const targetWidth = 320;
+            const targetHeight = Math.round(video.videoHeight * (targetWidth / video.videoWidth));
+            snapCanvas.width = targetWidth;
+            snapCanvas.height = targetHeight;
 
-            fetch('/process_frame', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ image: base64Image })
-            })
-            .then(res => res.json())
-            .then(data => {
+            snapCtx.drawImage(video, 0, 0, targetWidth, targetHeight);
+            const base64Image = snapCanvas.toDataURL('image/jpeg', 0.5);
+
+            isProcessing = true;
+
+            try {
+                const response = await fetch('/process_frame', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ 
+                        image: base64Image,
+                        displayWidth: video.clientWidth,
+                        displayHeight: video.clientHeight
+                    })
+                });
+
+                const data = await response.json();
                 overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
 
                 if (data.status === 'success') {
@@ -95,33 +118,35 @@
                         document.getElementById('attendance-status').textContent = `Attendance recorded for ${data.name}!`;
                     }
 
-                    // Render green bounding boxes & names
                     if (data.detections && data.detections.length > 0) {
                         data.detections.forEach(det => {
                             const [top, right, bottom, left] = det.box;
                             const width = right - left;
                             const height = bottom - top;
 
-                            // Green box border
+                            // Draw bounding box
                             overlayCtx.strokeStyle = '#00FF00';
                             overlayCtx.lineWidth = 3;
                             overlayCtx.strokeRect(left, top, width, height);
 
-                            // Green label background
+                            // Draw label banner
                             overlayCtx.fillStyle = '#00FF00';
-                            overlayCtx.fillRect(left, bottom - 30, width, 30);
+                            overlayCtx.fillRect(left, bottom - 26, width, 26);
 
-                            // Label text
+                            // Draw label text
                             overlayCtx.fillStyle = '#FFFFFF';
-                            overlayCtx.font = 'bold 16px Arial';
-                            overlayCtx.fillText(det.name, left + 6, bottom - 8);
+                            overlayCtx.font = 'bold 14px Arial';
+                            overlayCtx.fillText(det.name, left + 4, bottom - 8);
                         });
                     }
                 } else if (data.message) {
                     document.getElementById('attendance-status').textContent = data.message;
                 }
-            })
-            .catch(err => console.error("Error processing frame:", err));
+            } catch (err) {
+                console.error("Error processing frame:", err);
+            } finally {
+                isProcessing = false;
+            }
         }
     </script>
 </head>
