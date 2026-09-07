@@ -3,7 +3,6 @@ FROM python:3.11-slim
 ENV TZ="Asia/Kolkata"
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install tzdata for IST time and wget to fetch ONNX models
 RUN apt-get update && apt-get install -y --no-install-recommends \
     tzdata \
     wget \
@@ -13,11 +12,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Download YuNet detector and SFace recognizer directly during container build
+# Auto-download detection, recognition, and anti-spoofing models
 RUN wget -q -O face_detection_yunet_2023mar.onnx \
     https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx && \
     wget -q -O face_recognition_sface_2021dec.onnx \
-    https://github.com/opencv/opencv_zoo/raw/main/models/face_recognition_sface/face_recognition_sface_2021dec.onnx
+    https://github.com/opencv/opencv_zoo/raw/main/models/face_recognition_sface/face_recognition_sface_2021dec.onnx && \
+    wget -q -O MiniFASNetV2.onnx \
+    https://raw.githubusercontent.com/computervisioneng/face-anti-spoofing-onnx/main/models/MiniFASNetV2.onnx
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
