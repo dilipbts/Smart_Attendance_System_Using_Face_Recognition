@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Download the two official, rock-solid OpenCV Zoo models
+# Download verified models from opencv_zoo
 RUN curl -fL -o face_detection_yunet_2023mar.onnx \
     https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx && \
     curl -fL -o face_recognition_sface_2021dec.onnx \
