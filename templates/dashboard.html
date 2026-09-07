@@ -30,6 +30,7 @@
                 });
                 video.srcObject = stream;
                 statusEl.textContent = "Webcam active. Scanning faces...";
+                statusEl.style.color = "#fff";
                 isScanning = true;
                 
                 requestAnimationFrame(processingLoop);
@@ -56,6 +57,7 @@
             ctx.clearRect(0, 0, overlay.width, overlay.height);
 
             document.getElementById('attendance-status').textContent = "Attendance stopped.";
+            document.getElementById('attendance-status').style.color = "#fff";
             document.getElementById('recognized-name').textContent = "Recognized Person: No person detected";
         }
 
@@ -66,7 +68,6 @@
                 await sendFrameToBackend();
             }
 
-            // Pause between frames to keep CPU usage low
             setTimeout(() => {
                 if (isScanning) requestAnimationFrame(processingLoop);
             }, 600);
@@ -82,11 +83,9 @@
             const snapCtx = snapCanvas.getContext('2d');
             const overlayCtx = overlay.getContext('2d');
 
-            // Match overlay canvas to rendered video size
             overlay.width = video.clientWidth;
             overlay.height = video.clientHeight;
 
-            // Downscale frame to 320px width before upload to cut latency
             const targetWidth = 320;
             const targetHeight = Math.round(video.videoHeight * (targetWidth / video.videoWidth));
             snapCanvas.width = targetWidth;
@@ -114,8 +113,10 @@
                 if (data.status === 'success') {
                     document.getElementById('recognized-name').textContent = `Recognized Person: ${data.name}`;
                     
-                    if (data.marked) {
-                        document.getElementById('attendance-status').textContent = `Attendance recorded for ${data.name}!`;
+                    const statusEl = document.getElementById('attendance-status');
+                    if (data.action_status) {
+                        statusEl.textContent = data.action_status;
+                        statusEl.style.color = data.action_status.includes('WARNING') ? '#ff4d4d' : '#22c55e';
                     }
 
                     if (data.detections && data.detections.length > 0) {
@@ -124,18 +125,18 @@
                             const width = right - left;
                             const height = bottom - top;
 
-                            // Draw bounding box
-                            overlayCtx.strokeStyle = '#00FF00';
+                            // Green for real 3D person, Red for flat photo/screen
+                            const boxColor = det.is_live ? '#00FF00' : '#FF0000';
+
+                            overlayCtx.strokeStyle = boxColor;
                             overlayCtx.lineWidth = 3;
                             overlayCtx.strokeRect(left, top, width, height);
 
-                            // Draw label banner
-                            overlayCtx.fillStyle = '#00FF00';
+                            overlayCtx.fillStyle = boxColor;
                             overlayCtx.fillRect(left, bottom - 26, width, 26);
 
-                            // Draw label text
                             overlayCtx.fillStyle = '#FFFFFF';
-                            overlayCtx.font = 'bold 14px Arial';
+                            overlayCtx.font = 'bold 13px Arial';
                             overlayCtx.fillText(det.name, left + 4, bottom - 8);
                         });
                     }
@@ -143,7 +144,7 @@
                     document.getElementById('attendance-status').textContent = data.message;
                 }
             } catch (err) {
-                console.error("Error processing frame:", err);
+                console.error("Frame error:", err);
             } finally {
                 isProcessing = false;
             }
@@ -157,9 +158,9 @@
             <a href="{{ url_for('logout') }}" class="btn logout-btn" style="float: right; margin-left: 20px;">Logout</a>
         </header>
         <div class="main-content" style="margin-top: 60px; display: flex; justify-content: flex-end; gap: 20px;">
-            <!-- Attendance Logs Section -->
+            <!-- Attendance & Fraud Logs Section -->
             <div class="card logs-section" style="flex: 5; text-align: left;">
-                <h2>Attendance Logs</h2>
+                <h2>System Logs (Attendance & Spoofs)</h2>
                 <div class="search-bar">
                     <input 
                         type="text" 
@@ -172,15 +173,21 @@
                 <table class="log-table">
                     <thead>
                         <tr>
-                            <th>Log Name</th>
+                            <th>Log File</th>
                             <th>Actions</th>
                         </tr>
                     </thead>
                     <tbody>
                         {% if logs %}
                             {% for log in logs %}
-                            <tr>
-                                <td>{{ log }}</td>
+                            <tr style="{% if 'Spoof' in log %}background: rgba(239, 68, 68, 0.2);{% endif %}">
+                                <td>
+                                    {% if 'Spoof' in log %}
+                                        <span style="color: #ff8080; font-weight: bold;">[SPOOF]</span> {{ log }}
+                                    {% else %}
+                                        <span style="color: #80ff80; font-weight: bold;">[LIVE]</span> {{ log }}
+                                    {% endif %}
+                                </td>
                                 <td>
                                     <a href="{{ url_for('view_log', log_file=log) }}" class="btn view-btn">View</a>
                                     <a href="/static/Attendance Logs/{{ log }}" download class="btn download-btn">Download</a>
@@ -189,14 +196,14 @@
                             {% endfor %}
                         {% else %}
                             <tr>
-                                <td colspan="2">No attendance logs available.</td>
+                                <td colspan="2">No logs recorded yet.</td>
                             </tr>
                         {% endif %}
                     </tbody>
                 </table>
             </div>
 
-            <!-- Webcam and Controls Section -->
+            <!-- Live Camera Feed Section -->
             {% if session.role == 'Teacher' %}
             <div class="cam-section" style="flex: 4; text-align: right;">
                 <h2>Live Camera Feed</h2>
@@ -220,7 +227,7 @@
                     <p>No person detected</p>
                 </div>
                 
-                <p id="attendance-status" style="margin-top: 10px; color: #fff;"></p>
+                <p id="attendance-status" style="margin-top: 10px; font-weight: bold;"></p>
                 
                 <button class="btn start-attendance-btn" style="margin-top: 10px; display: block; width: 100%;" onclick="startWebcam()">Start Attendance</button>
                 <button class="btn stop-attendance-btn" style="margin-top: 10px; display: block; width: 100%;" onclick="stopWebcam()">Stop Attendance</button>
