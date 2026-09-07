@@ -25,44 +25,21 @@ IST = ZoneInfo("Asia/Kolkata")
 # Path to ONNX Models
 YUNET_MODEL = os.path.join(os.getcwd(), 'face_detection_yunet_2023mar.onnx')
 SFACE_MODEL = os.path.join(os.getcwd(), 'face_recognition_sface_2021dec.onnx')
-ANTISPOOF_MODEL = os.path.join(os.getcwd(), 'MiniFASNetV2.onnx')
 
-# Auto-download models if missing
+# Fallback download if executed locally
 if not os.path.exists(YUNET_MODEL):
-    print("[DOWNLOADING] YuNet face detection model...")
     urllib.request.urlretrieve(
         "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx",
         YUNET_MODEL
     )
 
 if not os.path.exists(SFACE_MODEL):
-    print("[DOWNLOADING] SFace face recognition model...")
     urllib.request.urlretrieve(
         "https://github.com/opencv/opencv_zoo/raw/main/models/face_recognition_sface/face_recognition_sface_2021dec.onnx",
         SFACE_MODEL
     )
 
-anti_spoof_net = None
-if not os.path.exists(ANTISPOOF_MODEL):
-    try:
-        print("[DOWNLOADING] MiniFASNetV2 anti-spoof model...")
-        urllib.request.urlretrieve(
-            "https://huggingface.co/qualcomm/MiniFASNet/resolve/main/MiniFASNetV2.onnx",
-            ANTISPOOF_MODEL
-        )
-    except Exception as e:
-        print(f"[WARNING] Could not retrieve MiniFASNetV2: {e}")
-
-if os.path.exists(ANTISPOOF_MODEL):
-    try:
-        anti_spoof_net = cv2.dnn.readNetFromONNX(ANTISPOOF_MODEL)
-        anti_spoof_net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
-        anti_spoof_net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
-        print("[LOADED] Anti-spoof network ready.")
-    except Exception as e:
-        print(f"[WARNING] Failed to initialize anti-spoof model: {e}")
-
-# Detection Model (YuNet)
+# 1. Detection Model (YuNet)
 detector = cv2.FaceDetectorYN.create(
     model=YUNET_MODEL,
     config='',
@@ -72,40 +49,70 @@ detector = cv2.FaceDetectorYN.create(
     top_k=5000
 )
 
-# Recognition Model (SFace)
+# 2. Recognition Model (SFace)
 recognizer = cv2.FaceRecognizerSF.create(
     model=SFACE_MODEL,
     config=''
 )
 
-def check_liveness(img_bgr, box):
-    if anti_spoof_net is None:
-        return True
-
+# Native Multi-Factor Anti-Spoofing Filter
+def check_liveness(img_bgr, face_data):
+    """
+    Evaluates face crop against photo/screen spoofs using:
+    1. Laplacian Texture Variance (catches blur on paper/displays)
+    2. HSV & YCbCr Skin Chrominance distribution (rejects flat RGB backlights)
+    3. Facial Landmark Geometric Plausibility from YuNet
+    """
     h, w, _ = img_bgr.shape
-    fx, fy, fw, fh = box
-    
-    padding_x = int(fw * 0.2)
-    padding_y = int(fh * 0.2)
-    
-    x1 = max(0, fx - padding_x)
-    y1 = max(0, fy - padding_y)
-    x2 = min(w, fx + fw + padding_x)
-    y2 = min(h, fy + fh + padding_y)
-    
+    fx, fy, fw, fh = face_data[0:4].astype(int)
+
+    # Boundary safety
+    x1, y1 = max(0, fx), max(0, fy)
+    x2, y2 = min(w, fx + fw), min(h, fy + fh)
     face_crop = img_bgr[y1:y2, x1:x2]
-    if face_crop.size == 0:
+
+    if face_crop.size == 0 or fw < 40 or fh < 40:
         return False
 
-    blob = cv2.dnn.blobFromImage(face_crop, 1.0, (80, 80), (0, 0, 0), swapRB=False, crop=False)
-    anti_spoof_net.setInput(blob)
-    preds = anti_spoof_net.forward()
+    # Check 1: Texture & Edge Sharpness (Laplacian)
+    gray_crop = cv2.cvtColor(face_crop, cv2.COLOR_BGR2GRAY)
+    laplacian_var = cv2.Laplacian(gray_crop, cv2.CV_64F).var()
+
+    # Extremely low variance indicates blurry paper or over-smoothed screen
+    if laplacian_var < 55.0:
+        return False
+
+    # Check 2: Color Space Reflection & Screen Glow Check (YCbCr + HSV)
+    ycrcb = cv2.cvtColor(face_crop, cv2.COLOR_BGR2YCrCb)
+    cr = ycrcb[:, :, 1]
+    cb = ycrcb[:, :, 2]
     
-    exp_preds = np.exp(preds - np.max(preds))
-    prob = exp_preds / exp_preds.sum()
-    
-    real_score = prob[0][1]
-    return real_score > 0.60
+    # Real human skin exhibits specific chrominance variance
+    cr_std = np.std(cr)
+    cb_std = np.std(cb)
+    if cr_std < 4.0 or cb_std < 4.0:
+        return False
+
+    # Check 3: 5-Point Landmark Geometry Plausibility
+    # YuNet outputs: [re_x, re_y, le_x, le_y, nt_x, nt_y, rcm_x, rcm_y, lcm_x, lcm_y]
+    landmarks = face_data[4:14].reshape((5, 2))
+    re, le, nose, rcm, lcm = landmarks
+
+    # Eye distance vs facial width ratio
+    eye_dist = np.linalg.norm(re - le)
+    if eye_dist <= 0 or (eye_dist / fw) < 0.20 or (eye_dist / fw) > 0.65:
+        return False
+
+    # Vertical proportionality (eyes to nose vs nose to mouth)
+    mid_eyes = (re + le) / 2.0
+    mid_mouth = (rcm + lcm) / 2.0
+    upper_face = np.linalg.norm(mid_eyes - nose)
+    lower_face = np.linalg.norm(nose - mid_mouth)
+
+    if lower_face == 0 or (upper_face / lower_face) < 0.35 or (upper_face / lower_face) > 2.6:
+        return False
+
+    return True
 
 # Load Known Faces
 KNOWN_FACES_DIR = os.path.join(os.getcwd(), 'Images_Attendance')
@@ -200,6 +207,7 @@ class User(db.Model):
 def is_logged_in():
     return 'username' in session
 
+# Routes
 @app.route('/')
 def welcome():
     return render_template('welcome.html')
@@ -257,7 +265,7 @@ def process_frame():
     display_width = data.get('displayWidth', 480)
     display_height = data.get('displayHeight', 360)
 
-    # Decode frame
+    # Decode base64 frame
     encoded_data = data['image'].split(',')[1]
     nparr = np.frombuffer(base64.b64decode(encoded_data), np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
@@ -266,7 +274,7 @@ def process_frame():
     scale_x = display_width / w
     scale_y = display_height / h
 
-    # Detect Faces
+    # Detect faces via YuNet
     detector.setInputSize((w, h))
     _, faces = detector.detect(img)
 
@@ -283,13 +291,10 @@ def process_frame():
     primary_name = 'No person detected'
 
     for face in faces:
-        box = face[0:4].astype(int)
-        fx, fy, fw, fh = box
+        # 1. Multi-factor liveness check
+        is_live = check_liveness(img, face)
 
-        # 1. Anti-Spoofing check
-        is_live = check_liveness(img, box)
-
-        # 2. Extract facial embedding to identify who is in front of the lens
+        # 2. Extract feature vector and match identity
         aligned_face = recognizer.alignCrop(img, face)
         live_feature = recognizer.feature(aligned_face)
 
@@ -308,7 +313,7 @@ def process_frame():
 
         primary_name = person_name
 
-        # 3. Log according to liveness outcome
+        # 3. Log to respective file
         if is_live:
             if person_name != "UNKNOWN":
                 recorded = mark_attendance(person_name)
@@ -319,6 +324,7 @@ def process_frame():
             recorded = record_spoof_attempt(person_name)
             action_status = f"WARNING: Fraud attempt recorded for {person_name}!" if recorded else f"Fraud re-detected ({person_name})"
 
+        fx, fy, fw, fh = face[0:4].astype(int)
         top = int(fy * scale_y)
         left = int(fx * scale_x)
         bottom = int((fy + fh) * scale_y)
