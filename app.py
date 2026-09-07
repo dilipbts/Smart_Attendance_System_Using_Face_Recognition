@@ -7,7 +7,6 @@ from flask_sqlalchemy import SQLAlchemy
 from flask_bcrypt import Bcrypt
 import cv2
 import numpy as np
-import face_recognition
 
 # Flask Initialization
 app = Flask(__name__)
@@ -19,35 +18,56 @@ app.permanent_session_lifetime = timedelta(minutes=30)
 bcrypt = Bcrypt(app)
 db = SQLAlchemy(app)
 
-# Timezone configuration (IST)
+# Indian Standard Time (IST)
 IST = ZoneInfo("Asia/Kolkata")
 
-# Load and encode student/known faces
-path = os.path.join(os.getcwd(), 'Images_Attendance')
-images = []
+# Path to ONNX Deep Learning Models
+YUNET_MODEL = os.path.join(os.getcwd(), 'face_detection_yunet_2023mar.onnx')
+SFACE_MODEL = os.path.join(os.getcwd(), 'face_recognition_sface_2021dec.onnx')
+
+# Initialize Deep Learning Models
+detector = cv2.FaceDetectorYN.create(
+    model=YUNET_MODEL,
+    config='',
+    input_size=(320, 320),
+    score_threshold=0.7,
+    nms_threshold=0.3,
+    top_k=5000
+)
+
+recognizer = cv2.FaceRecognizerSF.create(
+    model=SFACE_MODEL,
+    config=''
+)
+
+# Load and Pre-compute Features for Known Persons
+KNOWN_FACES_DIR = os.path.join(os.getcwd(), 'Images_Attendance')
+known_features = []
 class_names = []
 
-if os.path.exists(path):
-    image_list = os.listdir(path)
-    for img_name in image_list:
-        img = cv2.imread(os.path.join(path, img_name))
+def extract_feature_from_image(img_bgr):
+    h, w, _ = img_bgr.shape
+    detector.setInputSize((w, h))
+    _, faces = detector.detect(img_bgr)
+    if faces is not None and len(faces) > 0:
+        # Align face using 5 facial landmarks and extract deep feature vector
+        aligned_face = recognizer.alignCrop(img_bgr, faces[0])
+        feature = recognizer.feature(aligned_face)
+        return feature
+    return None
+
+if os.path.exists(KNOWN_FACES_DIR):
+    for img_name in os.listdir(KNOWN_FACES_DIR):
+        img_path = os.path.join(KNOWN_FACES_DIR, img_name)
+        img = cv2.imread(img_path)
         if img is not None:
-            images.append(img)
-            class_names.append(os.path.splitext(img_name)[0])
-
-def find_encodings(imgs):
-    encode_list = []
-    for img in imgs:
-        try:
-            rgb_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            encodes = face_recognition.face_encodings(rgb_img)
-            if len(encodes) > 0:
-                encode_list.append(encodes[0])
-        except Exception as e:
-            print(f"[WARNING] Encoding failed: {e}")
-    return encode_list
-
-encode_list_known = find_encodings(images)
+            feat = extract_feature_from_image(img)
+            if feat is not None:
+                known_features.append(feat)
+                class_names.append(os.path.splitext(img_name)[0].upper())
+                print(f"[LOADED] Feature vector mapped for: {os.path.splitext(img_name)[0].upper()}")
+            else:
+                print(f"[WARNING] No face detected in image: {img_name}")
 
 # Attendance Utilities
 def get_attendance_filename():
@@ -160,7 +180,7 @@ def process_frame():
     display_width = data.get('displayWidth', 480)
     display_height = data.get('displayHeight', 360)
 
-    # Decode uploaded base64 frame
+    # Decode base64 frame from browser
     encoded_data = data['image'].split(',')[1]
     nparr = np.frombuffer(base64.b64decode(encoded_data), np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
@@ -169,12 +189,11 @@ def process_frame():
     scale_x = display_width / w
     scale_y = display_height / h
 
-    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    # Run YuNet face detection
+    detector.setInputSize((w, h))
+    _, faces = detector.detect(img)
 
-    # Fast CPU face detection using HOG without upsampling
-    faces = face_recognition.face_locations(img_rgb, number_of_times_to_upsample=0, model="hog")
-    
-    if not faces:
+    if faces is None or len(faces) == 0:
         return jsonify({
             'status': 'success',
             'name': 'No person detected',
@@ -182,33 +201,45 @@ def process_frame():
             'marked': False
         })
 
-    encodings = face_recognition.face_encodings(img_rgb, faces)
-
     detections = []
     recognized_person = None
     marked = False
 
-    for encode_face, face_loc in zip(encodings, faces):
+    for face in faces:
+        # YuNet outputs: [x, y, w, h, x_re, y_re, x_le, y_le, x_nt, y_nt, x_rcm, y_rcm, x_lcm, y_lcm, score]
+        box = face[0:4].astype(int)
+        fx, fy, fw, fh = box
+
+        # Align and extract deep feature vector
+        aligned_face = recognizer.alignCrop(img, face)
+        live_feature = recognizer.feature(aligned_face)
+
         name = "UNKNOWN"
-        if len(encode_list_known) > 0:
-            face_distances = face_recognition.face_distance(encode_list_known, encode_face)
-            match_index = np.argmin(face_distances)
+        best_score = -1.0
+        best_idx = -1
 
-            if face_distances[match_index] < 0.50:
-                name = class_names[match_index].upper()
-                recognized_person = name
-                if not is_already_registered_this_hour(name):
-                    marked = mark_attendance(name)
+        # Match against known feature vectors using Cosine Similarity
+        for idx, k_feat in enumerate(known_features):
+            score = recognizer.match(k_feat, live_feature, cv2.FaceRecognizerSF_FR_COSINE)
+            if score > best_score:
+                best_score = score
+                best_idx = idx
 
-        # Scale detection coordinates to display canvas
-        top, right, bottom, left = face_loc
+        # SFace standard cosine similarity threshold is 0.363
+        if best_idx != -1 and best_score >= 0.363:
+            name = class_names[best_idx]
+            recognized_person = name
+            if not is_already_registered_this_hour(name):
+                marked = mark_attendance(name)
+
+        # Scale detection coordinates to display canvas format: [top, right, bottom, left]
+        top = int(fy * scale_y)
+        left = int(fx * scale_x)
+        bottom = int((fy + fh) * scale_y)
+        right = int((fx + fw) * scale_x)
+
         detections.append({
-            'box': [
-                int(top * scale_y),
-                int(right * scale_x),
-                int(bottom * scale_y),
-                int(left * scale_x)
-            ],
+            'box': [top, right, bottom, left],
             'name': name
         })
 
