@@ -24,16 +24,17 @@
             const statusEl = document.getElementById('attendance-status');
 
             try {
-                // Request camera access from client's browser
-                stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
+                stream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { width: { ideal: 640 }, height: { ideal: 480 } } 
+                });
                 video.srcObject = stream;
-                statusEl.textContent = "Webcam active. Scanning for faces...";
-
-                // Capture a frame every 1.5 seconds and send to backend
-                captureInterval = setInterval(sendFrameToBackend, 1500);
+                statusEl.textContent = "Webcam active. Scanning faces...";
+                
+                // Process frame every 1.2 seconds
+                captureInterval = setInterval(sendFrameToBackend, 1200);
             } catch (err) {
                 console.error("Camera access error:", err);
-                statusEl.textContent = "Failed to access webcam. Check browser permissions.";
+                statusEl.textContent = "Failed to access webcam. Please allow camera permissions.";
             }
         }
 
@@ -51,23 +52,32 @@
             const video = document.getElementById('webcam-video');
             video.srcObject = null;
 
+            const overlay = document.getElementById('overlay-canvas');
+            const ctx = overlay.getContext('2d');
+            ctx.clearRect(0, 0, overlay.width, overlay.height);
+
             document.getElementById('attendance-status').textContent = "Attendance stopped.";
             document.getElementById('recognized-name').textContent = "Recognized Person: No person detected";
         }
 
         function sendFrameToBackend() {
             const video = document.getElementById('webcam-video');
-            const canvas = document.getElementById('snapshot-canvas');
-            const context = canvas.getContext('2d');
+            const snapCanvas = document.getElementById('snapshot-canvas');
+            const overlay = document.getElementById('overlay-canvas');
 
             if (!video.videoWidth) return;
 
-            canvas.width = video.videoWidth;
-            canvas.height = video.videoHeight;
-            context.drawImage(video, 0, 0, canvas.width, canvas.height);
+            const snapCtx = snapCanvas.getContext('2d');
+            const overlayCtx = overlay.getContext('2d');
 
-            // Compress snapshot to base64 JPEG
-            const base64Image = canvas.toDataURL('image/jpeg', 0.7);
+            snapCanvas.width = video.videoWidth;
+            snapCanvas.height = video.videoHeight;
+            overlay.width = video.videoWidth;
+            overlay.height = video.videoHeight;
+
+            // Draw current frame to offscreen canvas
+            snapCtx.drawImage(video, 0, 0, snapCanvas.width, snapCanvas.height);
+            const base64Image = snapCanvas.toDataURL('image/jpeg', 0.6);
 
             fetch('/process_frame', {
                 method: 'POST',
@@ -76,10 +86,36 @@
             })
             .then(res => res.json())
             .then(data => {
+                overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
+
                 if (data.status === 'success') {
-                    document.getElementById('recognized-name').textContent = `Recognized Person: ${data.name || 'No person detected'}`;
+                    document.getElementById('recognized-name').textContent = `Recognized Person: ${data.name}`;
+                    
                     if (data.marked) {
                         document.getElementById('attendance-status').textContent = `Attendance recorded for ${data.name}!`;
+                    }
+
+                    // Render green bounding boxes & names
+                    if (data.detections && data.detections.length > 0) {
+                        data.detections.forEach(det => {
+                            const [top, right, bottom, left] = det.box;
+                            const width = right - left;
+                            const height = bottom - top;
+
+                            // Green box border
+                            overlayCtx.strokeStyle = '#00FF00';
+                            overlayCtx.lineWidth = 3;
+                            overlayCtx.strokeRect(left, top, width, height);
+
+                            // Green label background
+                            overlayCtx.fillStyle = '#00FF00';
+                            overlayCtx.fillRect(left, bottom - 30, width, 30);
+
+                            // Label text
+                            overlayCtx.fillStyle = '#FFFFFF';
+                            overlayCtx.font = 'bold 16px Arial';
+                            overlayCtx.fillText(det.name, left + 6, bottom - 8);
+                        });
                     }
                 } else if (data.message) {
                     document.getElementById('attendance-status').textContent = data.message;
@@ -135,18 +171,23 @@
                 </table>
             </div>
 
-            <!-- Webcam and Buttons Section -->
+            <!-- Webcam and Controls Section -->
             {% if session.role == 'Teacher' %}
             <div class="cam-section" style="flex: 4; text-align: right;">
                 <h2>Live Camera Feed</h2>
-                <!-- Video replaces the iframe to stream browser camera directly -->
-                <video 
-                    id="webcam-video" 
-                    autoplay 
-                    playsinline 
-                    muted 
-                    style="border: 2px solid #ddd; width: 100%; max-width: 450px; height: 320px; object-fit: cover; background: #000; border-radius: 8px;">
-                </video>
+                <div style="position: relative; width: 100%; max-width: 480px; margin: 0 auto;">
+                    <video 
+                        id="webcam-video" 
+                        autoplay 
+                        playsinline 
+                        muted 
+                        style="width: 100%; height: auto; background: #000; border-radius: 8px; display: block;">
+                    </video>
+                    <canvas 
+                        id="overlay-canvas" 
+                        style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none;">
+                    </canvas>
+                </div>
                 <canvas id="snapshot-canvas" style="display: none;"></canvas>
 
                 <div id="recognized-name" class="recognized-section" style="margin-top: 10px;">
