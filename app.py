@@ -63,36 +63,19 @@ recognizer = cv2.FaceRecognizerSF.create(
     config=''
 )
 
-# Multi-Capped Liveness Engine
+# Robust Liveness Filter (Background & Edge Independent)
 def check_liveness(img_bgr, face_data):
     """
-    Multi-Capped Liveness Engine:
-    1. Detects phone bezels and sharp edges around screen perimeters.
-    2. Enforces upper and lower bounds on sharpness to reject high-PPI screens and blur.
-    3. Traps screen backlight hot-spots and unnatural color plane saturation.
-    4. Validates 3D landmark proportions.
+    Evaluates skin chrominance, texture distribution, and 3D facial geometry
+    without inspecting background edges (door frames, walls, shelves).
     """
     h, w, _ = img_bgr.shape
     fx, fy, fw, fh = face_data[0:4].astype(int)
 
-    if fw < 50 or fh < 50:
+    # Rejection of distant/tiny faces
+    if fw < 45 or fh < 45:
         return False
 
-    # 1. Expanded Crop Check (Finds phone bezels, display rims, and rectangular borders)
-    pad_x = int(fw * 0.25)
-    pad_y = int(fh * 0.25)
-    bx1, by1 = max(0, fx - pad_x), max(0, fy - pad_y)
-    bx2, by2 = min(w, fx + fw + pad_x), min(h, fy + fh + pad_y)
-    outer_crop = img_bgr[by1:by2, bx1:bx2]
-
-    if outer_crop.size > 0:
-        outer_gray = cv2.cvtColor(outer_crop, cv2.COLOR_BGR2GRAY)
-        edges = cv2.Canny(outer_gray, 80, 200)
-        edge_density = np.sum(edges > 0) / outer_crop.size
-        if edge_density > 0.08:
-            return False
-
-    # 2. Tight Face Crop
     x1, y1 = max(0, fx), max(0, fy)
     x2, y2 = min(w, fx + fw), min(h, fy + fh)
     face_crop = img_bgr[y1:y2, x1:x2]
@@ -100,32 +83,35 @@ def check_liveness(img_bgr, face_data):
     if face_crop.size == 0:
         return False
 
-    # 3. Double-Capped Texture Sharpness (Laplacian Variance)
+    # 1. Texture Sharpness (Laplacian Variance)
+    # Real webcams in indoor lighting sit comfortably between 15.0 and 480.0
     gray_crop = cv2.cvtColor(face_crop, cv2.COLOR_BGR2GRAY)
     laplacian_var = cv2.Laplacian(gray_crop, cv2.CV_64F).var()
-    if laplacian_var < 20.0 or laplacian_var > 380.0:
+    if laplacian_var < 15.0 or laplacian_var > 480.0:
         return False
 
-    # 4. Screen Backlight Glare and Saturation Plane
-    hsv = cv2.cvtColor(face_crop, cv2.COLOR_BGR2HSV)
-    sat = hsv[:, :, 1]
-    val = hsv[:, :, 2]
-    if np.mean(val) > 235 or np.std(sat) < 5.0:
-        return False
-
-    # 5. Chrominance Variance
+    # 2. Skin Chrominance Dynamic Range (YCrCb)
+    # Natural human skin spreads across Cr and Cb channels; flat printouts/displays exhibit low variance
     ycrcb = cv2.cvtColor(face_crop, cv2.COLOR_BGR2YCrCb)
     cr = ycrcb[:, :, 1]
     cb = ycrcb[:, :, 2]
-    if np.std(cr) < 2.2 or np.std(cb) < 2.2:
+    if np.std(cr) < 1.6 or np.std(cb) < 1.6:
         return False
 
-    # 6. 5-Point Landmark Geometry Plausibility
+    # 3. Saturation Consistency (HSV)
+    # Screens and paper compress saturation or exhibit high backlight hotspots
+    hsv = cv2.cvtColor(face_crop, cv2.COLOR_BGR2HSV)
+    sat = hsv[:, :, 1]
+    val = hsv[:, :, 2]
+    if np.mean(val) > 245 or np.std(sat) < 3.0:
+        return False
+
+    # 4. Facial Landmark Spatial Geometry (YuNet 5-point layout)
     landmarks = face_data[4:14].reshape((5, 2))
     re, le, nose, rcm, lcm = landmarks
 
     eye_dist = np.linalg.norm(re - le)
-    if eye_dist <= 0 or (eye_dist / fw) < 0.18 or (eye_dist / fw) > 0.68:
+    if eye_dist <= 0 or (eye_dist / fw) < 0.15 or (eye_dist / fw) > 0.72:
         return False
 
     mid_eyes = (re + le) / 2.0
@@ -133,12 +119,12 @@ def check_liveness(img_bgr, face_data):
     upper_face = np.linalg.norm(mid_eyes - nose)
     lower_face = np.linalg.norm(nose - mid_mouth)
 
-    if lower_face == 0 or (upper_face / lower_face) < 0.28 or (upper_face / lower_face) > 2.9:
+    if lower_face == 0 or (upper_face / lower_face) < 0.20 or (upper_face / lower_face) > 3.2:
         return False
 
     return True
 
-# Database Models
+# Database Models for Persistent Storage
 class User(db.Model):
     __tablename__ = 'users'
     id = db.Column(db.Integer, primary_key=True)
