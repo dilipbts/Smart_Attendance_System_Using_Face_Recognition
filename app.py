@@ -1,4 +1,5 @@
-from flask import Flask, render_template, request, redirect, url_for, session, flash, Response
+import base64
+from flask import Flask, render_template, request, redirect, url_for, session, flash, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from flask_bcrypt import Bcrypt
 import cv2
@@ -14,7 +15,6 @@ app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///attendance_users.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.permanent_session_lifetime = timedelta(minutes=30)
 
-# Extensions Initialization
 bcrypt = Bcrypt(app)
 db = SQLAlchemy(app)
 
@@ -22,35 +22,29 @@ db = SQLAlchemy(app)
 path = os.path.join(os.getcwd(), 'Images_Attendance')
 images = []
 class_names = []
-image_list = os.listdir(path)
 
-# Read and store images and class names
-for img_name in image_list:
-    img = cv2.imread(os.path.join(path, img_name))
-    if img is not None:
-        images.append(img)
-        class_names.append(os.path.splitext(img_name)[0])
+if os.path.exists(path):
+    image_list = os.listdir(path)
+    for img_name in image_list:
+        img = cv2.imread(os.path.join(path, img_name))
+        if img is not None:
+            images.append(img)
+            class_names.append(os.path.splitext(img_name)[0])
 
-# Encode faces
 def find_encodings(images):
     encode_list = []
     for img in images:
         try:
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            encode = face_recognition.face_encodings(img)[0]
-            encode_list.append(encode)
-        except IndexError:
-            print(f"[WARNING] No face encodings found in image.")
+            encodes = face_recognition.face_encodings(img)
+            if len(encodes) > 0:
+                encode_list.append(encodes[0])
+        except Exception as e:
+            print(f"[WARNING] Encoding failed: {e}")
     return encode_list
 
 encode_list_known = find_encodings(images)
 
-# Global variables for webcam and attendance system
-webcam = None
-is_running = False
-recognized_name = ""
-
-# Utility Functions
 def get_attendance_filename():
     folder_path = os.path.join('static', 'Attendance Logs')
     if not os.path.exists(folder_path):
@@ -84,25 +78,24 @@ def mark_attendance(name):
             f.write('Name,Time,Date\n')
 
     if is_already_registered_this_hour(name):
-        print(f"{name} already registered in this hour, skipping.")
         return False
 
     with open(file_name, 'a') as f:
         time_now = datetime.now()
         t_string = time_now.strftime('%H:%M:%S')
-        d_string = datetime.now().strftime('%d/%m/%Y')
+        d_string = time_now.strftime('%d/%m/%Y')
         f.writelines(f'{name},{t_string},{d_string}\n')
-        print(f"{name} has been registered.")
         return True
 
-# User Model
 class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(80), unique=True, nullable=False)
     password = db.Column(db.String(200), nullable=False)
     role = db.Column(db.String(20), nullable=False)
 
-# Flask Routes
+def is_logged_in():
+    return 'username' in session
+
 @app.route('/')
 def welcome():
     return render_template('welcome.html')
@@ -132,7 +125,8 @@ def dashboard():
     if not is_logged_in():
         flash("Please log in first.", "warning")
         return redirect(url_for('authenticate'))
-    log_files = [f for f in os.listdir(os.path.join('static', 'Attendance Logs')) if f.endswith('.csv')]
+    folder = os.path.join('static', 'Attendance Logs')
+    log_files = [f for f in os.listdir(folder) if f.endswith('.csv')] if os.path.exists(folder) else []
     return render_template('dashboard.html', logs=log_files)
 
 @app.route('/view_log/<log_file>')
@@ -146,78 +140,56 @@ def view_log(log_file):
         flash("File not found.", "danger")
         return redirect(url_for('dashboard'))
 
-@app.route('/start_webcam', methods=['POST'])
-def start_webcam():
-    global is_running, webcam
-    if not is_running:
-        webcam = cv2.VideoCapture(0)
-        if not webcam.isOpened():
-            return {"message": "Failed to start webcam"}
-        is_running = True
-        return {"message": "Webcam started successfully!"}
-    return {"message": "Webcam is already running!"}
+@app.route('/process_frame', methods=['POST'])
+def process_frame():
+    # Enforce time restriction
+    current_hour = datetime.now().hour
+    if current_hour < 9 or current_hour > 17:
+        return jsonify({'status': 'error', 'message': 'Attendance allowed only between 9 AM and 5 PM.'})
 
-@app.route('/stop_webcam', methods=['POST'])
-def stop_webcam():
-    global is_running, webcam
-    if is_running:
-        is_running = False
-        if webcam:
-            webcam.release()
-        return {"message": "Webcam stopped successfully!"}
-    return {"message": "Webcam is not running!"}
+    data = request.get_json()
+    if not data or 'image' not in data:
+        return jsonify({'status': 'error', 'message': 'No image data'}), 400
 
-@app.route('/webcam_feed')
-def webcam_feed():
-    def generate_frames():
-        global is_running, recognized_name
+    # Decode base64 image from browser
+    encoded_data = data['image'].split(',')[1]
+    nparr = np.frombuffer(base64.b64decode(encoded_data), np.uint8)
+    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
-        # Restrict operation to 9 AM - 5 PM
-        current_hour = datetime.now().hour
-        if current_hour < 9 or current_hour > 17:
-            yield (b'--frame\r\n'
-                   b'Content-Type: text/plain\r\n\r\n'
-                   b'Attendance recognition is allowed only between 9 AM and 5 PM.\r\n')
-            return
+    # Downscale for performance
+    img_small = cv2.resize(img, (0, 0), fx=0.25, fy=0.25)
+    img_rgb = cv2.cvtColor(img_small, cv2.COLOR_BGR2RGB)
 
-        while is_running:
-            success, img = webcam.read()
-            if not success:
-                break
-            img_small = cv2.resize(img, (0, 0), fx=0.25, fy=0.25)
-            img_rgb = cv2.cvtColor(img_small, cv2.COLOR_BGR2RGB)
-            faces = face_recognition.face_locations(img_rgb)
-            encodings = face_recognition.face_encodings(img_rgb, faces)
-            for encode_face, face_loc in zip(encodings, faces):
-                matches = face_recognition.compare_faces(encode_list_known, encode_face)
-                face_distances = face_recognition.face_distance(encode_list_known, encode_face)
-                match_index = np.argmin(face_distances)
-                if matches[match_index]:
-                    recognized_name = class_names[match_index].upper()
-                    y1, x2, y2, x1 = [v * 4 for v in face_loc]
-                    cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                    cv2.rectangle(img, (x1, y2 - 35), (x2, y2), (0, 255, 0), cv2.FILLED)
-                    cv2.putText(img, recognized_name, (x1 + 6, y2 - 6), cv2.FONT_HERSHEY_COMPLEX, 1, (255, 255, 255), 2)
-                    if not is_already_registered_this_hour(recognized_name):
-                        mark_attendance(recognized_name)
-            _, buffer = cv2.imencode('.jpg', img)
-            yield (b'--frame\r\n'
-                   b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
-    return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
+    faces = face_recognition.face_locations(img_rgb)
+    encodings = face_recognition.face_encodings(img_rgb, faces)
+
+    recognized_person = None
+    marked = False
+
+    for encode_face in encodings:
+        if len(encode_list_known) == 0:
+            break
+        matches = face_recognition.compare_faces(encode_list_known, encode_face)
+        face_distances = face_recognition.face_distance(encode_list_known, encode_face)
+        match_index = np.argmin(face_distances)
+
+        if matches[match_index]:
+            recognized_person = class_names[match_index].upper()
+            if not is_already_registered_this_hour(recognized_person):
+                marked = mark_attendance(recognized_person)
+            break
+
+    return jsonify({
+        'status': 'success',
+        'name': recognized_person if recognized_person else 'No person detected',
+        'marked': marked
+    })
 
 @app.route('/logout')
 def logout():
     session.clear()
     flash("Logged out successfully.", "info")
     return redirect(url_for('authenticate'))
-
-@app.route('/get_recognized_name', methods=['GET'])
-def get_recognized_name():
-    global recognized_name
-    return {"name": recognized_name}
-
-def is_logged_in():
-    return 'username' in session
 
 if __name__ == '__main__':
     with app.app_context():
