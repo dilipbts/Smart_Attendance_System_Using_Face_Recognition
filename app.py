@@ -64,7 +64,6 @@ recognizer = cv2.FaceRecognizerSF.create(
 )
 
 # Active Verification Cache
-# Structure: { name: { "start_time": float, "samples": list, "last_seen": float, "triggered": bool, "status": str } }
 active_trackers = defaultdict(dict)
 
 def evaluate_3s_motion(samples):
@@ -293,7 +292,7 @@ def process_frame():
     current_time = time.time()
 
     for face in faces:
-        # Step 1: Immediate Identity Recognition
+        # 1. Identity Recognition
         aligned_face = recognizer.alignCrop(img, face)
         live_feature = recognizer.feature(aligned_face)
 
@@ -312,15 +311,14 @@ def process_frame():
 
         primary_name = person_name
 
-        # Extract normalized 5-point landmarks for motion tracking
+        # 2. Normalized 5-point facial landmarks calculation (Broadcasting Fix)
         fx, fy, fw, fh = face[0:4].astype(int)
-        raw_landmarks = face[4:14].astype(float)
-        norm_landmarks = (raw_landmarks - [fx, fy] * 5) / [fw, fh] * 5
+        raw_landmarks = face[4:14].reshape((5, 2)).astype(float)
+        norm_landmarks = ((raw_landmarks - [fx, fy]) / [max(fw, 1), max(fh, 1)]).flatten()
 
-        # Step 2: 3-Second Temporal Verification Buffer
+        # 3. 3-Second Temporal Verification Buffer
         tracker = active_trackers[person_name]
 
-        # Reset if face has left the camera for more than 2.5 seconds
         if "last_seen" in tracker and (current_time - tracker["last_seen"]) > 2.5:
             tracker.clear()
 
@@ -335,14 +333,14 @@ def process_frame():
 
         elapsed = current_time - tracker["start_time"]
 
-        # PHASE 1: Inside the 3-Second window -> STRICTLY NO DATABASE WRITING
+        # Phase 1: Under 3.0 seconds -> Do not write to database
         if elapsed < 3.0 and not tracker["triggered"]:
             remaining = max(1, 3 - int(elapsed))
             display_tag = f"{person_name} (Verifying: {remaining}s)"
-            box_color = '#FFD700'  # Yellow
+            box_color = '#FFD700'
             action_status = f"Face detected: Verifying liveness ({remaining}s remaining)..."
 
-        # PHASE 2: At or after 3.0 seconds -> TRIGGER FINAL DECISION & WRITE RECORD
+        # Phase 2: At or after 3.0 seconds -> Trigger database write once
         else:
             if not tracker["triggered"]:
                 is_live = evaluate_3s_motion(tracker["samples"])
@@ -360,13 +358,12 @@ def process_frame():
                     record_spoof_attempt(person_name)
                     action_status = f"FRAUD DETECTED: Spoof attempt recorded for {person_name}!"
 
-            # Maintain locked visual result after decision is written
             if tracker["status"] == "LIVE":
                 display_tag = f"LIVE: {person_name}"
-                box_color = '#00FF00'  # Green
+                box_color = '#00FF00'
             else:
                 display_tag = f"FRAUD / SPOOF: {person_name}"
-                box_color = '#FF0000'  # Red
+                box_color = '#FF0000'
 
         top = int(fy * scale_y)
         left = int(fx * scale_x)
