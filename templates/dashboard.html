@@ -29,14 +29,15 @@
                     video: { width: { ideal: 480 }, height: { ideal: 360 } } 
                 });
                 video.srcObject = stream;
-                statusEl.textContent = "Webcam active. Scanning faces...";
-                statusEl.style.color = "#fff";
+                statusEl.textContent = "Webcam active. Stand still for 3-second verification...";
+                statusEl.style.color = "#FFD700";
                 isScanning = true;
                 
                 requestAnimationFrame(processingLoop);
             } catch (err) {
                 console.error("Camera access error:", err);
-                statusEl.textContent = "Failed to access webcam. Please allow camera permissions.";
+                statusEl.textContent = "Failed to access webcam. Please check camera permissions.";
+                statusEl.style.color = "#ff4d4d";
             }
         }
 
@@ -68,9 +69,10 @@
                 await sendFrameToBackend();
             }
 
+            // Stream frames at ~400ms intervals so the 3-second buffer collects 7-8 samples
             setTimeout(() => {
                 if (isScanning) requestAnimationFrame(processingLoop);
-            }, 600);
+            }, 400);
         }
 
         async function sendFrameToBackend() {
@@ -116,7 +118,13 @@
                     const statusEl = document.getElementById('attendance-status');
                     if (data.action_status) {
                         statusEl.textContent = data.action_status;
-                        statusEl.style.color = data.action_status.includes('WARNING') ? '#ff4d4d' : '#22c55e';
+                        if (data.action_status.includes('VERIFIED')) {
+                            statusEl.style.color = '#22c55e';
+                        } else if (data.action_status.includes('ALERT') || data.action_status.includes('FRAUD')) {
+                            statusEl.style.color = '#ff4d4d';
+                        } else {
+                            statusEl.style.color = '#FFD700';
+                        }
                     }
 
                     if (data.detections && data.detections.length > 0) {
@@ -125,7 +133,8 @@
                             const width = right - left;
                             const height = bottom - top;
 
-                            const boxColor = det.is_live ? '#00FF00' : '#FF0000';
+                            // Uses the dynamic state color from backend: Yellow (Verifying), Green (Live), Red (Fraud)
+                            const boxColor = det.color || '#00FF00';
 
                             overlayCtx.strokeStyle = boxColor;
                             overlayCtx.lineWidth = 3;
@@ -134,8 +143,8 @@
                             overlayCtx.fillStyle = boxColor;
                             overlayCtx.fillRect(left, bottom - 26, width, 26);
 
-                            overlayCtx.fillStyle = '#FFFFFF';
-                            overlayCtx.font = 'bold 13px Arial';
+                            overlayCtx.fillStyle = '#000000';
+                            overlayCtx.font = 'bold 12px Arial';
                             overlayCtx.fillText(det.name, left + 4, bottom - 8);
                         });
                     }
@@ -143,7 +152,7 @@
                     document.getElementById('attendance-status').textContent = data.message;
                 }
             } catch (err) {
-                console.error("Frame error:", err);
+                console.error("Frame processing error:", err);
             } finally {
                 isProcessing = false;
             }
@@ -157,7 +166,7 @@
             <a href="{{ url_for('logout') }}" class="btn logout-btn" style="float: right; margin-left: 20px;">Logout</a>
         </header>
         <div class="main-content" style="margin-top: 60px; display: flex; justify-content: flex-end; gap: 20px;">
-            <!-- Attendance & Fraud Logs Section -->
+            <!-- Logs Section -->
             <div class="card logs-section" style="flex: 5; text-align: left;">
                 <h2>System Logs (Attendance & Spoofs)</h2>
                 <div class="search-bar">
@@ -202,7 +211,7 @@
                 </table>
             </div>
 
-            <!-- Live Camera Feed Section -->
+            <!-- Webcam Feed -->
             {% if session.role == 'Teacher' %}
             <div class="cam-section" style="flex: 4; text-align: right;">
                 <h2>Live Camera Feed</h2>
