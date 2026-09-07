@@ -14,3 +14,4 @@ pillow==11.1.0
 imutils==0.5.4
 opencv-python-headless==4.11.0.86
 gunicorn==23.0.0
+psycopg2-binary==2.9.10
