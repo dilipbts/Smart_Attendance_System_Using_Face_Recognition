@@ -27,24 +27,40 @@ YUNET_MODEL = os.path.join(os.getcwd(), 'face_detection_yunet_2023mar.onnx')
 SFACE_MODEL = os.path.join(os.getcwd(), 'face_recognition_sface_2021dec.onnx')
 ANTISPOOF_MODEL = os.path.join(os.getcwd(), 'MiniFASNetV2.onnx')
 
-# Auto-download fallbacks
+# Auto-download models if missing
 if not os.path.exists(YUNET_MODEL):
+    print("[DOWNLOADING] YuNet face detection model...")
     urllib.request.urlretrieve(
         "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx",
         YUNET_MODEL
     )
 
 if not os.path.exists(SFACE_MODEL):
+    print("[DOWNLOADING] SFace face recognition model...")
     urllib.request.urlretrieve(
         "https://github.com/opencv/opencv_zoo/raw/main/models/face_recognition_sface/face_recognition_sface_2021dec.onnx",
         SFACE_MODEL
     )
 
+anti_spoof_net = None
 if not os.path.exists(ANTISPOOF_MODEL):
-    urllib.request.urlretrieve(
-        "https://raw.githubusercontent.com/computervisioneng/face-anti-spoofing-onnx/main/models/MiniFASNetV2.onnx",
-        ANTISPOOF_MODEL
-    )
+    try:
+        print("[DOWNLOADING] MiniFASNetV2 anti-spoof model...")
+        urllib.request.urlretrieve(
+            "https://huggingface.co/qualcomm/MiniFASNet/resolve/main/MiniFASNetV2.onnx",
+            ANTISPOOF_MODEL
+        )
+    except Exception as e:
+        print(f"[WARNING] Could not retrieve MiniFASNetV2: {e}")
+
+if os.path.exists(ANTISPOOF_MODEL):
+    try:
+        anti_spoof_net = cv2.dnn.readNetFromONNX(ANTISPOOF_MODEL)
+        anti_spoof_net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
+        anti_spoof_net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
+        print("[LOADED] Anti-spoof network ready.")
+    except Exception as e:
+        print(f"[WARNING] Failed to initialize anti-spoof model: {e}")
 
 # Detection Model (YuNet)
 detector = cv2.FaceDetectorYN.create(
@@ -62,12 +78,10 @@ recognizer = cv2.FaceRecognizerSF.create(
     config=''
 )
 
-# Anti-Spoofing Model (MiniFASNet)
-anti_spoof_net = cv2.dnn.readNetFromONNX(ANTISPOOF_MODEL)
-anti_spoof_net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
-anti_spoof_net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
-
 def check_liveness(img_bgr, box):
+    if anti_spoof_net is None:
+        return True
+
     h, w, _ = img_bgr.shape
     fx, fy, fw, fh = box
     
@@ -117,6 +131,7 @@ if os.path.exists(KNOWN_FACES_DIR):
             if feat is not None:
                 known_features.append(feat)
                 class_names.append(os.path.splitext(img_name)[0].upper())
+                print(f"[LOADED] Feature vector mapped for: {os.path.splitext(img_name)[0].upper()}")
 
 # Log Handlers
 def get_log_filepath(prefix):
