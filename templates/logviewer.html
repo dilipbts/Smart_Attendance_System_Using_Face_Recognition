@@ -3,54 +3,91 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Attendance Log Viewer</title>
+    <title>Log Viewer - {{ log_file }}</title>
     <link rel="stylesheet" href="/static/styles.css">
-    <script>
-        // Function to filter table rows based on search input
-        function searchLog() {
-            const input = document.getElementById('searchInput').value.toLowerCase();
-            const rows = document.querySelectorAll('.log-table tbody tr');
-            rows.forEach(row => {
-                const cells = Array.from(row.querySelectorAll('td'));
-                const match = cells.some(cell => cell.textContent.toLowerCase().includes(input));
-                row.style.display = match ? '' : 'none'; // Show row if match is found, otherwise hide
-            });
+    <style>
+        .spoof-row {
+            background-color: rgba(239, 68, 68, 0.25) !important;
+            color: #ffb4b4;
+            font-weight: 500;
         }
-    </script>
+        .live-row {
+            background-color: rgba(34, 197, 94, 0.15) !important;
+            color: #d1fae5;
+        }
+        .tag-pill {
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: bold;
+            display: inline-block;
+        }
+        .tag-spoof {
+            background: #ef4444;
+            color: #ffffff;
+        }
+        .tag-live {
+            background: #22c55e;
+            color: #ffffff;
+        }
+    </style>
 </head>
 <body>
-    <div class="container log-viewer-page">
-        <div class="card">
-            <h1>Attendance Log: {{ log_file }}</h1>
-            <div class="search-bar">
-                <input 
-                    type="text" 
-                    id="searchInput" 
-                    placeholder="Search logs..." 
-                    onkeyup="searchLog()" 
-                    class="search-input"
-                >
+    <div class="container" style="padding: 40px 20px;">
+        <div class="card" style="max-width: 900px; margin: 0 auto; text-align: left;">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <div>
+                    <h2>
+                        {% if 'Spoof' in log_file %}
+                            <span class="tag-pill tag-spoof">FRAUD / SPOOF LOG</span>
+                        {% else %}
+                            <span class="tag-pill tag-live">ATTENDANCE LOG</span>
+                        {% endif %}
+                        {{ log_file }}
+                    </h2>
+                </div>
+                <div>
+                    <a href="/static/Attendance Logs/{{ log_file }}" download class="btn download-btn">Download CSV</a>
+                    <a href="{{ url_for('dashboard') }}" class="btn btn-primary" style="margin-left: 8px;">Back to Dashboard</a>
+                </div>
             </div>
-            <table class="log-table">
+
+            <table class="log-table" style="margin-top: 25px;">
                 <thead>
-                    <tr>
-                        <th>Name</th>
-                        <th>Date</th>
-                        <th>Time</th>
-                    </tr>
+                    {% if log_content and log_content|length > 0 %}
+                        {% set headers = log_content[0].strip().split(',') %}
+                        <tr>
+                            {% for header in headers %}
+                                <th>{{ header }}</th>
+                            {% endfor %}
+                        </tr>
+                    {% endif %}
                 </thead>
                 <tbody>
-                    {% for line in log_content %}
-                        {% set entry = line.split(',') %}
+                    {% if log_content and log_content|length > 1 %}
+                        {% for row in log_content[1:] %}
+                            {% set parts = row.strip().split(',') %}
+                            <tr class="{% if 'FRAUD' in row or 'Spoof' in log_file %}spoof-row{% else %}live-row{% endif %}">
+                                {% for item in parts %}
+                                    <td>
+                                        {% if item == 'FRAUD_ATTEMPT_DETECTED' %}
+                                            <span class="tag-pill tag-spoof">FRAUD DETECTED</span>
+                                        {% elif item == 'PRESENT' %}
+                                            <span class="tag-pill tag-live">PRESENT</span>
+                                        {% else %}
+                                            {{ item }}
+                                        {% endif %}
+                                    </td>
+                                {% endfor %}
+                            </tr>
+                        {% endfor %}
+                    {% else %}
                         <tr>
-                            <td>{{ entry[0].strip() }}</td>
-                            <td>{{ entry[2].strip() }}</td>
-                            <td>{{ entry[1].strip() }}</td>
+                            <td colspan="4" style="text-align: center; padding: 20px;">No entries recorded in this file yet.</td>
                         </tr>
-                    {% endfor %}
+                    {% endif %}
                 </tbody>
             </table>
-            <a href="{{ url_for('dashboard') }}" class="btn back-btn">Back to Dashboard</a>
         </div>
     </div>
 </body>
