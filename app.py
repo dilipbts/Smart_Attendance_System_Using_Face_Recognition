@@ -22,26 +22,31 @@ db = SQLAlchemy(app)
 # Indian Standard Time (IST)
 IST = ZoneInfo("Asia/Kolkata")
 
-# Path to ONNX Deep Learning Models
+# Path to ONNX Models
 YUNET_MODEL = os.path.join(os.getcwd(), 'face_detection_yunet_2023mar.onnx')
 SFACE_MODEL = os.path.join(os.getcwd(), 'face_recognition_sface_2021dec.onnx')
+ANTISPOOF_MODEL = os.path.join(os.getcwd(), 'MiniFASNetV2.onnx')
 
-# Automatic fallback download if run outside Docker
+# Auto-download fallbacks
 if not os.path.exists(YUNET_MODEL):
-    print("[DOWNLOADING] YuNet face detection model...")
     urllib.request.urlretrieve(
         "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx",
         YUNET_MODEL
     )
 
 if not os.path.exists(SFACE_MODEL):
-    print("[DOWNLOADING] SFace face recognition model...")
     urllib.request.urlretrieve(
         "https://github.com/opencv/opencv_zoo/raw/main/models/face_recognition_sface/face_recognition_sface_2021dec.onnx",
         SFACE_MODEL
     )
 
-# Initialize OpenCV DNN models
+if not os.path.exists(ANTISPOOF_MODEL):
+    urllib.request.urlretrieve(
+        "https://raw.githubusercontent.com/computervisioneng/face-anti-spoofing-onnx/main/models/MiniFASNetV2.onnx",
+        ANTISPOOF_MODEL
+    )
+
+# Detection Model (YuNet)
 detector = cv2.FaceDetectorYN.create(
     model=YUNET_MODEL,
     config='',
@@ -51,12 +56,44 @@ detector = cv2.FaceDetectorYN.create(
     top_k=5000
 )
 
+# Recognition Model (SFace)
 recognizer = cv2.FaceRecognizerSF.create(
     model=SFACE_MODEL,
     config=''
 )
 
-# Load and Pre-compute Features for Known Persons
+# Anti-Spoofing Model (MiniFASNet)
+anti_spoof_net = cv2.dnn.readNetFromONNX(ANTISPOOF_MODEL)
+anti_spoof_net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
+anti_spoof_net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
+
+def check_liveness(img_bgr, box):
+    h, w, _ = img_bgr.shape
+    fx, fy, fw, fh = box
+    
+    padding_x = int(fw * 0.2)
+    padding_y = int(fh * 0.2)
+    
+    x1 = max(0, fx - padding_x)
+    y1 = max(0, fy - padding_y)
+    x2 = min(w, fx + fw + padding_x)
+    y2 = min(h, fy + fh + padding_y)
+    
+    face_crop = img_bgr[y1:y2, x1:x2]
+    if face_crop.size == 0:
+        return False
+
+    blob = cv2.dnn.blobFromImage(face_crop, 1.0, (80, 80), (0, 0, 0), swapRB=False, crop=False)
+    anti_spoof_net.setInput(blob)
+    preds = anti_spoof_net.forward()
+    
+    exp_preds = np.exp(preds - np.max(preds))
+    prob = exp_preds / exp_preds.sum()
+    
+    real_score = prob[0][1]
+    return real_score > 0.60
+
+# Load Known Faces
 KNOWN_FACES_DIR = os.path.join(os.getcwd(), 'Images_Attendance')
 known_features = []
 class_names = []
@@ -80,51 +117,62 @@ if os.path.exists(KNOWN_FACES_DIR):
             if feat is not None:
                 known_features.append(feat)
                 class_names.append(os.path.splitext(img_name)[0].upper())
-                print(f"[LOADED] Feature vector mapped for: {os.path.splitext(img_name)[0].upper()}")
-            else:
-                print(f"[WARNING] No face detected in: {img_name}")
 
-# Attendance Logging Utilities
-def get_attendance_filename():
+# Log Handlers
+def get_log_filepath(prefix):
     folder_path = os.path.join('static', 'Attendance Logs')
-    if not os.path.exists(folder_path):
-        os.makedirs(folder_path)
+    os.makedirs(folder_path, exist_ok=True)
     today_date = datetime.now(IST).strftime('%d-%m-%Y')
-    return os.path.join(folder_path, f'Attendance_{today_date}.csv')
+    return os.path.join(folder_path, f'{prefix}_{today_date}.csv')
 
-def is_already_registered_this_hour(name):
-    file_name = get_attendance_filename()
-    if not os.path.exists(file_name):
+def is_already_logged_this_hour(file_path, name):
+    if not os.path.exists(file_path):
         return False
 
-    with open(file_name, 'r') as f:
+    with open(file_path, 'r') as f:
         data_list = f.readlines()
         today_date = datetime.now(IST).strftime('%d/%m/%Y')
         current_hour = datetime.now(IST).strftime('%H')
 
         for line in data_list:
             parts = line.strip().split(',')
-            if len(parts) == 3:
-                entry_name, entry_time, entry_date = parts
+            if len(parts) >= 3:
+                entry_name, entry_time, entry_date = parts[0], parts[1], parts[2]
                 entry_hour = entry_time.split(':')[0]
                 if entry_name == name and entry_date == today_date and entry_hour == current_hour:
                     return True
     return False
 
 def mark_attendance(name):
-    file_name = get_attendance_filename()
+    file_name = get_log_filepath('Attendance')
     if not os.path.exists(file_name):
         with open(file_name, 'w') as f:
-            f.write('Name,Time,Date\n')
+            f.write('Name,Time,Date,Status\n')
 
-    if is_already_registered_this_hour(name):
+    if is_already_logged_this_hour(file_name, name):
         return False
 
     with open(file_name, 'a') as f:
         time_now = datetime.now(IST)
         t_string = time_now.strftime('%H:%M:%S')
         d_string = time_now.strftime('%d/%m/%Y')
-        f.writelines(f'{name},{t_string},{d_string}\n')
+        f.writelines(f'{name},{t_string},{d_string},PRESENT\n')
+        return True
+
+def record_spoof_attempt(name):
+    file_name = get_log_filepath('Spoof_Logs')
+    if not os.path.exists(file_name):
+        with open(file_name, 'w') as f:
+            f.write('Name,Time,Date,Status\n')
+
+    if is_already_logged_this_hour(file_name, name):
+        return False
+
+    with open(file_name, 'a') as f:
+        time_now = datetime.now(IST)
+        t_string = time_now.strftime('%H:%M:%S')
+        d_string = time_now.strftime('%d/%m/%Y')
+        f.writelines(f'{name},{t_string},{d_string},FRAUD_ATTEMPT_DETECTED\n')
         return True
 
 # User Model
@@ -137,7 +185,6 @@ class User(db.Model):
 def is_logged_in():
     return 'username' in session
 
-# Routes
 @app.route('/')
 def welcome():
     return render_template('welcome.html')
@@ -195,7 +242,7 @@ def process_frame():
     display_width = data.get('displayWidth', 480)
     display_height = data.get('displayHeight', 360)
 
-    # Decode base64 frame
+    # Decode frame
     encoded_data = data['image'].split(',')[1]
     nparr = np.frombuffer(base64.b64decode(encoded_data), np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
@@ -204,7 +251,7 @@ def process_frame():
     scale_x = display_width / w
     scale_y = display_height / h
 
-    # Detect faces via YuNet
+    # Detect Faces
     detector.setInputSize((w, h))
     _, faces = detector.detect(img)
 
@@ -213,39 +260,50 @@ def process_frame():
             'status': 'success',
             'name': 'No person detected',
             'detections': [],
-            'marked': False
+            'action_status': ''
         })
 
     detections = []
-    recognized_person = None
-    marked = False
+    action_status = ''
+    primary_name = 'No person detected'
 
     for face in faces:
-        fx, fy, fw, fh = face[0:4].astype(int)
+        box = face[0:4].astype(int)
+        fx, fy, fw, fh = box
 
-        # Align face and compute 128-d deep embedding
+        # 1. Anti-Spoofing check
+        is_live = check_liveness(img, box)
+
+        # 2. Extract facial embedding to identify who is in front of the lens
         aligned_face = recognizer.alignCrop(img, face)
         live_feature = recognizer.feature(aligned_face)
 
-        name = "UNKNOWN"
+        person_name = "UNKNOWN"
         best_score = -1.0
         best_idx = -1
 
-        # Match against known feature vectors via Cosine Similarity
         for idx, k_feat in enumerate(known_features):
             score = recognizer.match(k_feat, live_feature, cv2.FaceRecognizerSF_FR_COSINE)
             if score > best_score:
                 best_score = score
                 best_idx = idx
 
-        # Standard SFace cosine similarity match threshold
         if best_idx != -1 and best_score >= 0.363:
-            name = class_names[best_idx]
-            recognized_person = name
-            if not is_already_registered_this_hour(name):
-                marked = mark_attendance(name)
+            person_name = class_names[best_idx]
 
-        # Map bounding box back to browser display dimensions
+        primary_name = person_name
+
+        # 3. Log according to liveness outcome
+        if is_live:
+            if person_name != "UNKNOWN":
+                recorded = mark_attendance(person_name)
+                action_status = f"Attendance marked for {person_name}" if recorded else f"{person_name} already marked this hour"
+            else:
+                action_status = "Live face detected, but unknown identity"
+        else:
+            recorded = record_spoof_attempt(person_name)
+            action_status = f"WARNING: Fraud attempt recorded for {person_name}!" if recorded else f"Fraud re-detected ({person_name})"
+
         top = int(fy * scale_y)
         left = int(fx * scale_x)
         bottom = int((fy + fh) * scale_y)
@@ -253,14 +311,15 @@ def process_frame():
 
         detections.append({
             'box': [top, right, bottom, left],
-            'name': name
+            'name': person_name if is_live else f"FAKE: {person_name}",
+            'is_live': is_live
         })
 
     return jsonify({
         'status': 'success',
-        'name': recognized_person if recognized_person else 'No person detected',
+        'name': primary_name,
         'detections': detections,
-        'marked': marked
+        'action_status': action_status
     })
 
 @app.route('/logout')
