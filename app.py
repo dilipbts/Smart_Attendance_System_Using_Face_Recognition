@@ -63,23 +63,23 @@ recognizer = cv2.FaceRecognizerSF.create(
     config=''
 )
 
-# 3-Second Temporal Session Cache
-tracking_sessions = defaultdict(dict)
+# Active Verification Cache
+# Structure: { name: { "start_time": float, "samples": list, "last_seen": float, "triggered": bool, "status": str } }
+active_trackers = defaultdict(dict)
 
-def evaluate_3s_liveness(samples):
+def evaluate_3s_motion(samples):
     """
-    Evaluates micro-motion and geometric variance over the 3-second buffer.
-    Static photos and screens exhibit flat rigidity across frames.
+    Checks landmark micro-variance and natural tremor over the 3-second buffer.
+    Photos, prints, and phone screens maintain near-zero variance.
     """
-    if len(samples) < 4:
+    if len(samples) < 5:
         return False
 
-    samples_arr = np.array(samples)  # Shape: (N, 10)
-    variances = np.var(samples_arr, axis=0)
-    total_motion = np.sum(variances)
+    arr = np.array(samples)  # Shape: (N, 10)
+    variance_sum = np.sum(np.var(arr, axis=0))
 
-    # Threshold for natural micro-tremor and breathing movement
-    return bool(total_motion > 0.00012)
+    # Threshold for real human micro-movements vs flat rigid displays
+    return bool(variance_sum > 0.00014)
 
 # Database Models
 class User(db.Model):
@@ -129,7 +129,7 @@ if os.path.exists(KNOWN_FACES_DIR):
                 known_features.append(feat)
                 class_names.append(os.path.splitext(img_name)[0].upper())
 
-# Helpers
+# Database Logging Helpers
 def mark_attendance(name):
     now = datetime.now(IST)
     d_string = now.strftime('%d/%m/%Y')
@@ -293,6 +293,7 @@ def process_frame():
     current_time = time.time()
 
     for face in faces:
+        # Step 1: Immediate Identity Recognition
         aligned_face = recognizer.alignCrop(img, face)
         live_feature = recognizer.feature(aligned_face)
 
@@ -311,56 +312,61 @@ def process_frame():
 
         primary_name = person_name
 
-        # Normalized 5-point facial landmarks
+        # Extract normalized 5-point landmarks for motion tracking
         fx, fy, fw, fh = face[0:4].astype(int)
         raw_landmarks = face[4:14].astype(float)
         norm_landmarks = (raw_landmarks - [fx, fy] * 5) / [fw, fh] * 5
 
-        # 3-Second Evaluation Buffer
-        session_data = tracking_sessions[person_name]
-        
-        # Reset if not seen for over 2.5 seconds
-        if "last_seen" in session_data and (current_time - session_data["last_seen"]) > 2.5:
-            session_data.clear()
+        # Step 2: 3-Second Temporal Verification Buffer
+        tracker = active_trackers[person_name]
 
-        if "start_time" not in session_data:
-            session_data["start_time"] = current_time
-            session_data["samples"] = []
-            session_data["decision"] = None
+        # Reset if face has left the camera for more than 2.5 seconds
+        if "last_seen" in tracker and (current_time - tracker["last_seen"]) > 2.5:
+            tracker.clear()
 
-        session_data["last_seen"] = current_time
-        session_data["samples"].append(norm_landmarks)
+        if "start_time" not in tracker:
+            tracker["start_time"] = current_time
+            tracker["samples"] = []
+            tracker["triggered"] = False
+            tracker["status"] = "ANALYZING"
 
-        elapsed = current_time - session_data["start_time"]
-        state_color = '#00BFFF'
+        tracker["last_seen"] = current_time
+        tracker["samples"].append(norm_landmarks)
 
-        if elapsed < 3.0 and session_data["decision"] is None:
-            remaining = max(1, int(3.0 - elapsed) + 1)
-            display_tag = f"{person_name} (Verifying... {remaining}s)"
-            action_status = f"Hold still for verification: {remaining}s left"
-            state_color = '#FFD700' # Yellow
+        elapsed = current_time - tracker["start_time"]
+
+        # PHASE 1: Inside the 3-Second window -> STRICTLY NO DATABASE WRITING
+        if elapsed < 3.0 and not tracker["triggered"]:
+            remaining = max(1, 3 - int(elapsed))
+            display_tag = f"{person_name} (Verifying: {remaining}s)"
+            box_color = '#FFD700'  # Yellow
+            action_status = f"Face detected: Verifying liveness ({remaining}s remaining)..."
+
+        # PHASE 2: At or after 3.0 seconds -> TRIGGER FINAL DECISION & WRITE RECORD
         else:
-            # 3 seconds reached: run verdict
-            if session_data["decision"] is None:
-                is_real = evaluate_3s_liveness(session_data["samples"])
-                session_data["decision"] = "LIVE" if is_real else "FRAUD"
+            if not tracker["triggered"]:
+                is_live = evaluate_3s_motion(tracker["samples"])
+                tracker["triggered"] = True
 
-                if is_real:
+                if is_live:
+                    tracker["status"] = "LIVE"
                     if person_name != "UNKNOWN":
                         marked = mark_attendance(person_name)
-                        action_status = f"VERIFIED: Attendance marked for {person_name}!" if marked else f"{person_name} already marked this hour"
+                        action_status = f"VERIFIED: Attendance recorded for {person_name}!" if marked else f"{person_name} already logged this hour."
                     else:
-                        action_status = "Live person detected, but identity UNKNOWN"
+                        action_status = "Live person confirmed, but identity is UNKNOWN."
                 else:
+                    tracker["status"] = "SPOOF"
                     record_spoof_attempt(person_name)
-                    action_status = f"ALERT: Fraud attempt recorded for {person_name}!"
+                    action_status = f"FRAUD DETECTED: Spoof attempt recorded for {person_name}!"
 
-            if session_data["decision"] == "LIVE":
+            # Maintain locked visual result after decision is written
+            if tracker["status"] == "LIVE":
                 display_tag = f"LIVE: {person_name}"
-                state_color = '#00FF00' # Green
+                box_color = '#00FF00'  # Green
             else:
                 display_tag = f"FRAUD / SPOOF: {person_name}"
-                state_color = '#FF0000' # Red
+                box_color = '#FF0000'  # Red
 
         top = int(fy * scale_y)
         left = int(fx * scale_x)
@@ -370,7 +376,7 @@ def process_frame():
         detections.append({
             'box': [top, right, bottom, left],
             'name': display_tag,
-            'color': state_color
+            'color': box_color
         })
 
     return jsonify({
@@ -386,7 +392,7 @@ def logout():
     flash("Logged out successfully.", "info")
     return redirect(url_for('authenticate'))
 
-# Database Seed
+# Seed Default Users
 with app.app_context():
     db.create_all()
 
