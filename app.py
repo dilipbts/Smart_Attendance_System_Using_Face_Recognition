@@ -39,7 +39,7 @@ if not os.path.exists(SFACE_MODEL):
         SFACE_MODEL
     )
 
-# 1. Detection Model (YuNet)
+# Detection Model (YuNet)
 detector = cv2.FaceDetectorYN.create(
     model=YUNET_MODEL,
     config='',
@@ -49,67 +49,54 @@ detector = cv2.FaceDetectorYN.create(
     top_k=5000
 )
 
-# 2. Recognition Model (SFace)
+# Recognition Model (SFace)
 recognizer = cv2.FaceRecognizerSF.create(
     model=SFACE_MODEL,
     config=''
 )
 
-# Native Multi-Factor Anti-Spoofing Filter
+# Calibrated Liveness Filter for Webcams
 def check_liveness(img_bgr, face_data):
-    """
-    Evaluates face crop against photo/screen spoofs using:
-    1. Laplacian Texture Variance (catches blur on paper/displays)
-    2. HSV & YCbCr Skin Chrominance distribution (rejects flat RGB backlights)
-    3. Facial Landmark Geometric Plausibility from YuNet
-    """
     h, w, _ = img_bgr.shape
     fx, fy, fw, fh = face_data[0:4].astype(int)
 
-    # Boundary safety
+    if fw < 45 or fh < 45:
+        return False
+
     x1, y1 = max(0, fx), max(0, fy)
     x2, y2 = min(w, fx + fw), min(h, fy + fh)
     face_crop = img_bgr[y1:y2, x1:x2]
 
-    if face_crop.size == 0 or fw < 40 or fh < 40:
+    if face_crop.size == 0:
         return False
 
-    # Check 1: Texture & Edge Sharpness (Laplacian)
+    # 1. Texture Sharpness (Laplacian Variance)
     gray_crop = cv2.cvtColor(face_crop, cv2.COLOR_BGR2GRAY)
     laplacian_var = cv2.Laplacian(gray_crop, cv2.CV_64F).var()
-
-    # Extremely low variance indicates blurry paper or over-smoothed screen
-    if laplacian_var < 55.0:
+    if laplacian_var < 18.0:
         return False
 
-    # Check 2: Color Space Reflection & Screen Glow Check (YCbCr + HSV)
+    # 2. Chrominance Distribution
     ycrcb = cv2.cvtColor(face_crop, cv2.COLOR_BGR2YCrCb)
     cr = ycrcb[:, :, 1]
     cb = ycrcb[:, :, 2]
-    
-    # Real human skin exhibits specific chrominance variance
-    cr_std = np.std(cr)
-    cb_std = np.std(cb)
-    if cr_std < 4.0 or cb_std < 4.0:
+    if np.std(cr) < 1.8 or np.std(cb) < 1.8:
         return False
 
-    # Check 3: 5-Point Landmark Geometry Plausibility
-    # YuNet outputs: [re_x, re_y, le_x, le_y, nt_x, nt_y, rcm_x, rcm_y, lcm_x, lcm_y]
+    # 3. Geometric Landmark Plausibility
     landmarks = face_data[4:14].reshape((5, 2))
     re, le, nose, rcm, lcm = landmarks
 
-    # Eye distance vs facial width ratio
     eye_dist = np.linalg.norm(re - le)
-    if eye_dist <= 0 or (eye_dist / fw) < 0.20 or (eye_dist / fw) > 0.65:
+    if eye_dist <= 0 or (eye_dist / fw) < 0.16 or (eye_dist / fw) > 0.75:
         return False
 
-    # Vertical proportionality (eyes to nose vs nose to mouth)
     mid_eyes = (re + le) / 2.0
     mid_mouth = (rcm + lcm) / 2.0
     upper_face = np.linalg.norm(mid_eyes - nose)
     lower_face = np.linalg.norm(nose - mid_mouth)
 
-    if lower_face == 0 or (upper_face / lower_face) < 0.35 or (upper_face / lower_face) > 2.6:
+    if lower_face == 0 or (upper_face / lower_face) < 0.20 or (upper_face / lower_face) > 3.2:
         return False
 
     return True
@@ -138,7 +125,6 @@ if os.path.exists(KNOWN_FACES_DIR):
             if feat is not None:
                 known_features.append(feat)
                 class_names.append(os.path.splitext(img_name)[0].upper())
-                print(f"[LOADED] Feature vector mapped for: {os.path.splitext(img_name)[0].upper()}")
 
 # Log Handlers
 def get_log_filepath(prefix):
@@ -207,7 +193,6 @@ class User(db.Model):
 def is_logged_in():
     return 'username' in session
 
-# Routes
 @app.route('/')
 def welcome():
     return render_template('welcome.html')
@@ -265,7 +250,6 @@ def process_frame():
     display_width = data.get('displayWidth', 480)
     display_height = data.get('displayHeight', 360)
 
-    # Decode base64 frame
     encoded_data = data['image'].split(',')[1]
     nparr = np.frombuffer(base64.b64decode(encoded_data), np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
@@ -274,7 +258,6 @@ def process_frame():
     scale_x = display_width / w
     scale_y = display_height / h
 
-    # Detect faces via YuNet
     detector.setInputSize((w, h))
     _, faces = detector.detect(img)
 
@@ -291,10 +274,8 @@ def process_frame():
     primary_name = 'No person detected'
 
     for face in faces:
-        # 1. Multi-factor liveness check
         is_live = check_liveness(img, face)
 
-        # 2. Extract feature vector and match identity
         aligned_face = recognizer.alignCrop(img, face)
         live_feature = recognizer.feature(aligned_face)
 
@@ -313,7 +294,6 @@ def process_frame():
 
         primary_name = person_name
 
-        # 3. Log to respective file
         if is_live:
             if person_name != "UNKNOWN":
                 recorded = mark_attendance(person_name)
