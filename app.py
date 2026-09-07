@@ -241,7 +241,7 @@ def view_log(log_file):
 def process_frame():
     now_ist = datetime.now(IST)
     if now_ist.hour < 9 or now_ist.hour > 17:
-        return jsonify({'status': 'error', 'message': 'Attendance allowed only between 9:00 AM and 5:00 PM IST.'})
+        return jsonify({'status': 'error', 'message': 'Attendance allowed only between 9:00 AM and 11:50 PM IST.'})
 
     data = request.get_json(silent=True)
     if not data or 'image' not in data:
