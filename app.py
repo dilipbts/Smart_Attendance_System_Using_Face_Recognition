@@ -49,7 +49,7 @@ def find_encodings(imgs):
 
 encode_list_known = find_encodings(images)
 
-# Attendance File Utilities
+# Attendance Utilities
 def get_attendance_filename():
     folder_path = os.path.join('static', 'Attendance Logs')
     if not os.path.exists(folder_path):
@@ -151,22 +151,37 @@ def view_log(log_file):
 def process_frame():
     now_ist = datetime.now(IST)
     if now_ist.hour < 9 or now_ist.hour > 17:
-        return jsonify({'status': 'error', 'message': 'Attendance is only allowed between 9:00 AM and 5:00 PM IST.'})
+        return jsonify({'status': 'error', 'message': 'Attendance allowed only between 9:00 AM and 5:00 PM IST.'})
 
-    data = request.get_json()
+    data = request.get_json(silent=True)
     if not data or 'image' not in data:
         return jsonify({'status': 'error', 'message': 'No image data'}), 400
 
-    # Decode base64 frame
+    display_width = data.get('displayWidth', 480)
+    display_height = data.get('displayHeight', 360)
+
+    # Decode uploaded base64 frame
     encoded_data = data['image'].split(',')[1]
     nparr = np.frombuffer(base64.b64decode(encoded_data), np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
-    # Downscale frame for quick detection
-    img_small = cv2.resize(img, (0, 0), fx=0.25, fy=0.25)
-    img_rgb = cv2.cvtColor(img_small, cv2.COLOR_BGR2RGB)
+    h, w, _ = img.shape
+    scale_x = display_width / w
+    scale_y = display_height / h
 
-    faces = face_recognition.face_locations(img_rgb)
+    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+    # Fast CPU face detection using HOG without upsampling
+    faces = face_recognition.face_locations(img_rgb, number_of_times_to_upsample=0, model="hog")
+    
+    if not faces:
+        return jsonify({
+            'status': 'success',
+            'name': 'No person detected',
+            'detections': [],
+            'marked': False
+        })
+
     encodings = face_recognition.face_encodings(img_rgb, faces)
 
     detections = []
@@ -176,20 +191,24 @@ def process_frame():
     for encode_face, face_loc in zip(encodings, faces):
         name = "UNKNOWN"
         if len(encode_list_known) > 0:
-            matches = face_recognition.compare_faces(encode_list_known, encode_face)
             face_distances = face_recognition.face_distance(encode_list_known, encode_face)
             match_index = np.argmin(face_distances)
 
-            if matches[match_index]:
+            if face_distances[match_index] < 0.50:
                 name = class_names[match_index].upper()
                 recognized_person = name
                 if not is_already_registered_this_hour(name):
                     marked = mark_attendance(name)
 
-        # Scale coordinates back up to video element size (* 4)
-        top, right, bottom, left = [v * 4 for v in face_loc]
+        # Scale detection coordinates to display canvas
+        top, right, bottom, left = face_loc
         detections.append({
-            'box': [top, right, bottom, left],
+            'box': [
+                int(top * scale_y),
+                int(right * scale_x),
+                int(bottom * scale_y),
+                int(left * scale_x)
+            ],
             'name': name
         })
 
