@@ -1,16 +1,23 @@
 FROM python:3.11-slim
 
-# Configure timezone to IST (Asia/Kolkata)
 ENV TZ="Asia/Kolkata"
 ENV DEBIAN_FRONTEND=noninteractive
 
+# Install tzdata for IST time and wget to fetch ONNX models
 RUN apt-get update && apt-get install -y --no-install-recommends \
     tzdata \
+    wget \
     && ln -fs /usr/share/zoneinfo/$TZ /etc/localtime \
     && dpkg-reconfigure --frontend noninteractive tzdata \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
+
+# Download YuNet detector and SFace recognizer directly during container build
+RUN wget -q -O face_detection_yunet_2023mar.onnx \
+    https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx && \
+    wget -q -O face_recognition_sface_2021dec.onnx \
+    https://github.com/opencv/opencv_zoo/raw/main/models/face_recognition_sface/face_recognition_sface_2021dec.onnx
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
