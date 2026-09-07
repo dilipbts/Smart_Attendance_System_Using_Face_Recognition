@@ -1,9 +1,11 @@
 import os
+import io
+import csv
 import base64
 import urllib.request
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-from flask import Flask, render_template, request, redirect, url_for, session, flash, jsonify
+from flask import Flask, render_template, request, redirect, url_for, session, flash, jsonify, Response
 from flask_sqlalchemy import SQLAlchemy
 from flask_bcrypt import Bcrypt
 import cv2
@@ -11,8 +13,14 @@ import numpy as np
 
 # Flask Initialization
 app = Flask(__name__)
-app.secret_key = os.getenv('FLASK_SECRET_KEY', 'your_default_secret_key')
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///attendance_users.db'
+app.secret_key = os.getenv('FLASK_SECRET_KEY', 'default_attendance_secret_key')
+
+# Read Render PostgreSQL URL (falls back to local SQLite if running locally)
+db_url = os.getenv('DATABASE_URL', 'sqlite:///attendance_users.db')
+if db_url.startswith("postgres://"):
+    db_url = db_url.replace("postgres://", "postgresql://", 1)
+
+app.config['SQLALCHEMY_DATABASE_URI'] = db_url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.permanent_session_lifetime = timedelta(minutes=30)
 
@@ -55,7 +63,7 @@ recognizer = cv2.FaceRecognizerSF.create(
     config=''
 )
 
-# Calibrated Liveness Filter for Webcams
+# Calibrated Liveness Filter
 def check_liveness(img_bgr, face_data):
     h, w, _ = img_bgr.shape
     fx, fy, fw, fh = face_data[0:4].astype(int)
@@ -70,7 +78,7 @@ def check_liveness(img_bgr, face_data):
     if face_crop.size == 0:
         return False
 
-    # 1. Texture Sharpness (Laplacian Variance)
+    # 1. Texture Sharpness
     gray_crop = cv2.cvtColor(face_crop, cv2.COLOR_BGR2GRAY)
     laplacian_var = cv2.Laplacian(gray_crop, cv2.CV_64F).var()
     if laplacian_var < 18.0:
@@ -101,6 +109,30 @@ def check_liveness(img_bgr, face_data):
 
     return True
 
+# Database Models for Persistent Storage
+class User(db.Model):
+    __tablename__ = 'users'
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(80), unique=True, nullable=False)
+    password = db.Column(db.String(200), nullable=False)
+    role = db.Column(db.String(20), nullable=False)
+
+class AttendanceRecord(db.Model):
+    __tablename__ = 'attendance_records'
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(100), nullable=False)
+    time = db.Column(db.String(20), nullable=False)
+    date = db.Column(db.String(20), nullable=False)
+    status = db.Column(db.String(50), default="PRESENT")
+
+class SpoofRecord(db.Model):
+    __tablename__ = 'spoof_records'
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(100), nullable=False)
+    time = db.Column(db.String(20), nullable=False)
+    date = db.Column(db.String(20), nullable=False)
+    status = db.Column(db.String(50), default="FRAUD_ATTEMPT_DETECTED")
+
 # Load Known Faces
 KNOWN_FACES_DIR = os.path.join(os.getcwd(), 'Images_Attendance')
 known_features = []
@@ -126,73 +158,52 @@ if os.path.exists(KNOWN_FACES_DIR):
                 known_features.append(feat)
                 class_names.append(os.path.splitext(img_name)[0].upper())
 
-# Log Handlers
-def get_log_filepath(prefix):
-    folder_path = os.path.join('static', 'Attendance Logs')
-    os.makedirs(folder_path, exist_ok=True)
-    today_date = datetime.now(IST).strftime('%d-%m-%Y')
-    return os.path.join(folder_path, f'{prefix}_{today_date}.csv')
-
-def is_already_logged_this_hour(file_path, name):
-    if not os.path.exists(file_path):
-        return False
-
-    with open(file_path, 'r') as f:
-        data_list = f.readlines()
-        today_date = datetime.now(IST).strftime('%d/%m/%Y')
-        current_hour = datetime.now(IST).strftime('%H')
-
-        for line in data_list:
-            parts = line.strip().split(',')
-            if len(parts) >= 3:
-                entry_name, entry_time, entry_date = parts[0], parts[1], parts[2]
-                entry_hour = entry_time.split(':')[0]
-                if entry_name == name and entry_date == today_date and entry_hour == current_hour:
-                    return True
-    return False
-
+# Database Logging Helpers
 def mark_attendance(name):
-    file_name = get_log_filepath('Attendance')
-    if not os.path.exists(file_name):
-        with open(file_name, 'w') as f:
-            f.write('Name,Time,Date,Status\n')
+    now = datetime.now(IST)
+    d_string = now.strftime('%d/%m/%Y')
+    current_hour = now.strftime('%H')
 
-    if is_already_logged_this_hour(file_name, name):
-        return False
+    # Check if marked this hour
+    recent = AttendanceRecord.query.filter_by(name=name, date=d_string).all()
+    for rec in recent:
+        if rec.time.split(':')[0] == current_hour:
+            return False
 
-    with open(file_name, 'a') as f:
-        time_now = datetime.now(IST)
-        t_string = time_now.strftime('%H:%M:%S')
-        d_string = time_now.strftime('%d/%m/%Y')
-        f.writelines(f'{name},{t_string},{d_string},PRESENT\n')
-        return True
+    new_record = AttendanceRecord(
+        name=name,
+        time=now.strftime('%H:%M:%S'),
+        date=d_string,
+        status="PRESENT"
+    )
+    db.session.add(new_record)
+    db.session.commit()
+    return True
 
 def record_spoof_attempt(name):
-    file_name = get_log_filepath('Spoof_Logs')
-    if not os.path.exists(file_name):
-        with open(file_name, 'w') as f:
-            f.write('Name,Time,Date,Status\n')
+    now = datetime.now(IST)
+    d_string = now.strftime('%d/%m/%Y')
+    current_hour = now.strftime('%H')
 
-    if is_already_logged_this_hour(file_name, name):
-        return False
+    recent = SpoofRecord.query.filter_by(name=name, date=d_string).all()
+    for rec in recent:
+        if rec.time.split(':')[0] == current_hour:
+            return False
 
-    with open(file_name, 'a') as f:
-        time_now = datetime.now(IST)
-        t_string = time_now.strftime('%H:%M:%S')
-        d_string = time_now.strftime('%d/%m/%Y')
-        f.writelines(f'{name},{t_string},{d_string},FRAUD_ATTEMPT_DETECTED\n')
-        return True
-
-# User Model
-class User(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    username = db.Column(db.String(80), unique=True, nullable=False)
-    password = db.Column(db.String(200), nullable=False)
-    role = db.Column(db.String(20), nullable=False)
+    new_spoof = SpoofRecord(
+        name=name,
+        time=now.strftime('%H:%M:%S'),
+        date=d_string,
+        status="FRAUD_ATTEMPT_DETECTED"
+    )
+    db.session.add(new_spoof)
+    db.session.commit()
+    return True
 
 def is_logged_in():
     return 'username' in session
 
+# Routes
 @app.route('/')
 def welcome():
     return render_template('welcome.html')
@@ -204,7 +215,7 @@ def authenticate():
         username = request.form.get('username')
         password = request.form.get('password')
         if not role or not username or not password:
-            flash("All fields are required. Please fill out the form completely.", "danger")
+            flash("All fields are required.", "danger")
             return redirect(url_for('authenticate'))
         user = User.query.filter_by(username=username, role=role).first()
         if user and bcrypt.check_password_hash(user.password, password):
@@ -214,7 +225,7 @@ def authenticate():
             flash("Login successful!", "success")
             return redirect(url_for('dashboard'))
         else:
-            flash("Invalid credentials or role. Please try again.", "danger")
+            flash("Invalid credentials or role.", "danger")
     return render_template('authenticate.html')
 
 @app.route('/dashboard')
@@ -222,25 +233,59 @@ def dashboard():
     if not is_logged_in():
         flash("Please log in first.", "warning")
         return redirect(url_for('authenticate'))
-    folder = os.path.join('static', 'Attendance Logs')
-    log_files = [f for f in os.listdir(folder) if f.endswith('.csv')] if os.path.exists(folder) else []
-    return render_template('dashboard.html', logs=log_files)
+
+    # Gather distinct dates recorded in the database
+    att_dates = [r[0] for r in db.session.query(AttendanceRecord.date).distinct().all()]
+    spf_dates = [r[0] for r in db.session.query(SpoofRecord.date).distinct().all()]
+
+    logs = []
+    for d in sorted(set(att_dates), reverse=True):
+        logs.append(f"Attendance_{d.replace('/', '-')}.csv")
+    for d in sorted(set(spf_dates), reverse=True):
+        logs.append(f"Spoof_Logs_{d.replace('/', '-')}.csv")
+
+    return render_template('dashboard.html', logs=logs)
 
 @app.route('/view_log/<log_file>')
 def view_log(log_file):
-    log_path = os.path.join('static', 'Attendance Logs', log_file)
-    if os.path.exists(log_path):
-        with open(log_path, 'r') as file:
-            log_content = file.readlines()
-        return render_template('logviewer.html', log_file=log_file, log_content=log_content)
+    date_str = log_file.replace('Attendance_', '').replace('Spoof_Logs_', '').replace('.csv', '').replace('-', '/')
+    
+    log_content = ["Name,Time,Date,Status\n"]
+    if "Spoof" in log_file:
+        records = SpoofRecord.query.filter_by(date=date_str).order_by(SpoofRecord.id.desc()).all()
     else:
-        flash("File not found.", "danger")
-        return redirect(url_for('dashboard'))
+        records = AttendanceRecord.query.filter_by(date=date_str).order_by(AttendanceRecord.id.desc()).all()
+
+    for r in records:
+        log_content.append(f"{r.name},{r.time},{r.date},{r.status}\n")
+
+    return render_template('logviewer.html', log_file=log_file, log_content=log_content)
+
+@app.route('/download_log/<log_file>')
+def download_log(log_file):
+    date_str = log_file.replace('Attendance_', '').replace('Spoof_Logs_', '').replace('.csv', '').replace('-', '/')
+    
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["Name", "Time", "Date", "Status"])
+
+    if "Spoof" in log_file:
+        records = SpoofRecord.query.filter_by(date=date_str).all()
+    else:
+        records = AttendanceRecord.query.filter_by(date=date_str).all()
+
+    for r in records:
+        writer.writerow([r.name, r.time, r.date, r.status])
+
+    return Response(
+        output.getvalue(),
+        mimetype="text/csv",
+        headers={"Content-disposition": f"attachment; filename={log_file}"}
+    )
 
 @app.route('/process_frame', methods=['POST'])
 def process_frame():
     now_ist = datetime.now(IST)
-    # Time restriction: 00:00 AM to 11:50 PM IST
     if now_ist.hour == 23 and now_ist.minute > 50:
         return jsonify({'status': 'error', 'message': 'Attendance portal closed between 11:50 PM and 12:00 AM IST.'})
 
@@ -330,7 +375,8 @@ def logout():
     flash("Logged out successfully.", "info")
     return redirect(url_for('authenticate'))
 
+with app.app_context():
+    db.create_all()
+
 if __name__ == '__main__':
-    with app.app_context():
-        db.create_all()
     app.run(debug=True)
