@@ -2,9 +2,11 @@ import os
 import io
 import csv
 import base64
+import time
 import urllib.request
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
+from collections import defaultdict
 from flask import Flask, render_template, request, redirect, url_for, session, flash, jsonify, Response
 from flask_sqlalchemy import SQLAlchemy
 from flask_bcrypt import Bcrypt
@@ -15,7 +17,7 @@ import numpy as np
 app = Flask(__name__)
 app.secret_key = os.getenv('FLASK_SECRET_KEY', 'default_attendance_secret_key')
 
-# Read Render PostgreSQL URL (falls back to local SQLite if running locally)
+# Read PostgreSQL URL or fallback to SQLite
 db_url = os.getenv('DATABASE_URL', 'sqlite:///attendance_users.db')
 if db_url.startswith("postgres://"):
     db_url = db_url.replace("postgres://", "postgresql://", 1)
@@ -34,7 +36,6 @@ IST = ZoneInfo("Asia/Kolkata")
 YUNET_MODEL = os.path.join(os.getcwd(), 'face_detection_yunet_2023mar.onnx')
 SFACE_MODEL = os.path.join(os.getcwd(), 'face_recognition_sface_2021dec.onnx')
 
-# Fallback download if executed locally
 if not os.path.exists(YUNET_MODEL):
     urllib.request.urlretrieve(
         "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx",
@@ -47,7 +48,7 @@ if not os.path.exists(SFACE_MODEL):
         SFACE_MODEL
     )
 
-# Detection Model (YuNet)
+# Models
 detector = cv2.FaceDetectorYN.create(
     model=YUNET_MODEL,
     config='',
@@ -57,74 +58,30 @@ detector = cv2.FaceDetectorYN.create(
     top_k=5000
 )
 
-# Recognition Model (SFace)
 recognizer = cv2.FaceRecognizerSF.create(
     model=SFACE_MODEL,
     config=''
 )
 
-# Robust Liveness Filter (Background & Edge Independent)
-def check_liveness(img_bgr, face_data):
+# 3-Second Temporal Session Cache
+tracking_sessions = defaultdict(dict)
+
+def evaluate_3s_liveness(samples):
     """
-    Evaluates skin chrominance, texture distribution, and 3D facial geometry
-    without inspecting background edges (door frames, walls, shelves).
+    Evaluates micro-motion and geometric variance over the 3-second buffer.
+    Static photos and screens exhibit flat rigidity across frames.
     """
-    h, w, _ = img_bgr.shape
-    fx, fy, fw, fh = face_data[0:4].astype(int)
-
-    # Rejection of distant/tiny faces
-    if fw < 45 or fh < 45:
+    if len(samples) < 4:
         return False
 
-    x1, y1 = max(0, fx), max(0, fy)
-    x2, y2 = min(w, fx + fw), min(h, fy + fh)
-    face_crop = img_bgr[y1:y2, x1:x2]
+    samples_arr = np.array(samples)  # Shape: (N, 10)
+    variances = np.var(samples_arr, axis=0)
+    total_motion = np.sum(variances)
 
-    if face_crop.size == 0:
-        return False
+    # Threshold for natural micro-tremor and breathing movement
+    return bool(total_motion > 0.00012)
 
-    # 1. Texture Sharpness (Laplacian Variance)
-    # Real webcams in indoor lighting sit comfortably between 15.0 and 480.0
-    gray_crop = cv2.cvtColor(face_crop, cv2.COLOR_BGR2GRAY)
-    laplacian_var = cv2.Laplacian(gray_crop, cv2.CV_64F).var()
-    if laplacian_var < 15.0 or laplacian_var > 480.0:
-        return False
-
-    # 2. Skin Chrominance Dynamic Range (YCrCb)
-    # Natural human skin spreads across Cr and Cb channels; flat printouts/displays exhibit low variance
-    ycrcb = cv2.cvtColor(face_crop, cv2.COLOR_BGR2YCrCb)
-    cr = ycrcb[:, :, 1]
-    cb = ycrcb[:, :, 2]
-    if np.std(cr) < 1.6 or np.std(cb) < 1.6:
-        return False
-
-    # 3. Saturation Consistency (HSV)
-    # Screens and paper compress saturation or exhibit high backlight hotspots
-    hsv = cv2.cvtColor(face_crop, cv2.COLOR_BGR2HSV)
-    sat = hsv[:, :, 1]
-    val = hsv[:, :, 2]
-    if np.mean(val) > 245 or np.std(sat) < 3.0:
-        return False
-
-    # 4. Facial Landmark Spatial Geometry (YuNet 5-point layout)
-    landmarks = face_data[4:14].reshape((5, 2))
-    re, le, nose, rcm, lcm = landmarks
-
-    eye_dist = np.linalg.norm(re - le)
-    if eye_dist <= 0 or (eye_dist / fw) < 0.15 or (eye_dist / fw) > 0.72:
-        return False
-
-    mid_eyes = (re + le) / 2.0
-    mid_mouth = (rcm + lcm) / 2.0
-    upper_face = np.linalg.norm(mid_eyes - nose)
-    lower_face = np.linalg.norm(nose - mid_mouth)
-
-    if lower_face == 0 or (upper_face / lower_face) < 0.20 or (upper_face / lower_face) > 3.2:
-        return False
-
-    return True
-
-# Database Models for Persistent Storage
+# Database Models
 class User(db.Model):
     __tablename__ = 'users'
     id = db.Column(db.Integer, primary_key=True)
@@ -148,7 +105,7 @@ class SpoofRecord(db.Model):
     date = db.Column(db.String(20), nullable=False)
     status = db.Column(db.String(50), default="FRAUD_ATTEMPT_DETECTED")
 
-# Load Known Faces from Directory
+# Load Known Faces
 KNOWN_FACES_DIR = os.path.join(os.getcwd(), 'Images_Attendance')
 known_features = []
 class_names = []
@@ -159,8 +116,7 @@ def extract_feature_from_image(img_bgr):
     _, faces = detector.detect(img_bgr)
     if faces is not None and len(faces) > 0:
         aligned_face = recognizer.alignCrop(img_bgr, faces[0])
-        feature = recognizer.feature(aligned_face)
-        return feature
+        return recognizer.feature(aligned_face)
     return None
 
 if os.path.exists(KNOWN_FACES_DIR):
@@ -172,9 +128,8 @@ if os.path.exists(KNOWN_FACES_DIR):
             if feat is not None:
                 known_features.append(feat)
                 class_names.append(os.path.splitext(img_name)[0].upper())
-                print(f"[REGISTERED] Mapped face feature for: {os.path.splitext(img_name)[0].upper()}")
 
-# Database Helpers
+# Helpers
 def mark_attendance(name):
     now = datetime.now(IST)
     d_string = now.strftime('%d/%m/%Y')
@@ -232,7 +187,7 @@ def authenticate():
         if not role or not username or not password:
             flash("All fields are required.", "danger")
             return redirect(url_for('authenticate'))
-        
+
         user = User.query.filter(
             User.username == username,
             db.func.lower(User.role) == role.lower()
@@ -268,7 +223,6 @@ def dashboard():
 @app.route('/view_log/<log_file>')
 def view_log(log_file):
     date_str = log_file.replace('Attendance_', '').replace('Spoof_Logs_', '').replace('.csv', '').replace('-', '/')
-    
     log_content = ["Name,Time,Date,Status\n"]
     if "Spoof" in log_file:
         records = SpoofRecord.query.filter_by(date=date_str).order_by(SpoofRecord.id.desc()).all()
@@ -283,7 +237,6 @@ def view_log(log_file):
 @app.route('/download_log/<log_file>')
 def download_log(log_file):
     date_str = log_file.replace('Attendance_', '').replace('Spoof_Logs_', '').replace('.csv', '').replace('-', '/')
-    
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow(["Name", "Time", "Date", "Status"])
@@ -337,10 +290,9 @@ def process_frame():
     detections = []
     action_status = ''
     primary_name = 'No person detected'
+    current_time = time.time()
 
     for face in faces:
-        is_live = check_liveness(img, face)
-
         aligned_face = recognizer.alignCrop(img, face)
         live_feature = recognizer.feature(aligned_face)
 
@@ -359,17 +311,57 @@ def process_frame():
 
         primary_name = person_name
 
-        if is_live:
-            if person_name != "UNKNOWN":
-                recorded = mark_attendance(person_name)
-                action_status = f"Attendance marked for {person_name}" if recorded else f"{person_name} already marked this hour"
-            else:
-                action_status = "Live face detected, but unknown identity"
-        else:
-            recorded = record_spoof_attempt(person_name)
-            action_status = f"WARNING: Fraud attempt recorded for {person_name}!" if recorded else f"Fraud re-detected ({person_name})"
-
+        # Normalized 5-point facial landmarks
         fx, fy, fw, fh = face[0:4].astype(int)
+        raw_landmarks = face[4:14].astype(float)
+        norm_landmarks = (raw_landmarks - [fx, fy] * 5) / [fw, fh] * 5
+
+        # 3-Second Evaluation Buffer
+        session_data = tracking_sessions[person_name]
+        
+        # Reset if not seen for over 2.5 seconds
+        if "last_seen" in session_data and (current_time - session_data["last_seen"]) > 2.5:
+            session_data.clear()
+
+        if "start_time" not in session_data:
+            session_data["start_time"] = current_time
+            session_data["samples"] = []
+            session_data["decision"] = None
+
+        session_data["last_seen"] = current_time
+        session_data["samples"].append(norm_landmarks)
+
+        elapsed = current_time - session_data["start_time"]
+        state_color = '#00BFFF'
+
+        if elapsed < 3.0 and session_data["decision"] is None:
+            remaining = max(1, int(3.0 - elapsed) + 1)
+            display_tag = f"{person_name} (Verifying... {remaining}s)"
+            action_status = f"Hold still for verification: {remaining}s left"
+            state_color = '#FFD700' # Yellow
+        else:
+            # 3 seconds reached: run verdict
+            if session_data["decision"] is None:
+                is_real = evaluate_3s_liveness(session_data["samples"])
+                session_data["decision"] = "LIVE" if is_real else "FRAUD"
+
+                if is_real:
+                    if person_name != "UNKNOWN":
+                        marked = mark_attendance(person_name)
+                        action_status = f"VERIFIED: Attendance marked for {person_name}!" if marked else f"{person_name} already marked this hour"
+                    else:
+                        action_status = "Live person detected, but identity UNKNOWN"
+                else:
+                    record_spoof_attempt(person_name)
+                    action_status = f"ALERT: Fraud attempt recorded for {person_name}!"
+
+            if session_data["decision"] == "LIVE":
+                display_tag = f"LIVE: {person_name}"
+                state_color = '#00FF00' # Green
+            else:
+                display_tag = f"FRAUD / SPOOF: {person_name}"
+                state_color = '#FF0000' # Red
+
         top = int(fy * scale_y)
         left = int(fx * scale_x)
         bottom = int((fy + fh) * scale_y)
@@ -377,8 +369,8 @@ def process_frame():
 
         detections.append({
             'box': [top, right, bottom, left],
-            'name': person_name if is_live else f"FAKE: {person_name}",
-            'is_live': is_live
+            'name': display_tag,
+            'color': state_color
         })
 
     return jsonify({
@@ -394,40 +386,27 @@ def logout():
     flash("Logged out successfully.", "info")
     return redirect(url_for('authenticate'))
 
-# Database initialization and user credential seeding
+# Database Seed
 with app.app_context():
     db.create_all()
 
-    # 1. Teacher Account
     teacher = User.query.filter_by(username='Guru').first()
     if not teacher:
         hashed_teacher_pw = bcrypt.generate_password_hash('1234').decode('utf-8')
-        seed_teacher = User(
-            username='Guru',
-            password=hashed_teacher_pw,
-            role='Teacher'
-        )
-        db.session.add(seed_teacher)
+        db.session.add(User(username='Guru', password=hashed_teacher_pw, role='Teacher'))
     else:
         teacher.password = bcrypt.generate_password_hash('1234').decode('utf-8')
         teacher.role = 'Teacher'
 
-    # 2. Student Account
     student = User.query.filter_by(username='Dilip DK').first()
     if not student:
         hashed_student_pw = bcrypt.generate_password_hash('demonking').decode('utf-8')
-        seed_student = User(
-            username='Dilip DK',
-            password=hashed_student_pw,
-            role='Student'
-        )
-        db.session.add(seed_student)
+        db.session.add(User(username='Dilip DK', password=hashed_student_pw, role='Student'))
     else:
         student.password = bcrypt.generate_password_hash('demonking').decode('utf-8')
         student.role = 'Student'
 
     db.session.commit()
-    print("[DATABASE] Verified user credentials for Guru (Teacher) and Dilip DK (Student).")
 
 if __name__ == '__main__':
     app.run(debug=True)
