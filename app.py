@@ -1,12 +1,13 @@
+import os
 import base64
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from flask import Flask, render_template, request, redirect, url_for, session, flash, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from flask_bcrypt import Bcrypt
 import cv2
 import numpy as np
 import face_recognition
-import os
-from datetime import datetime, timedelta
 
 # Flask Initialization
 app = Flask(__name__)
@@ -18,7 +19,10 @@ app.permanent_session_lifetime = timedelta(minutes=30)
 bcrypt = Bcrypt(app)
 db = SQLAlchemy(app)
 
-# Path to the folder containing images
+# Timezone configuration (IST)
+IST = ZoneInfo("Asia/Kolkata")
+
+# Load and encode student/known faces
 path = os.path.join(os.getcwd(), 'Images_Attendance')
 images = []
 class_names = []
@@ -31,12 +35,12 @@ if os.path.exists(path):
             images.append(img)
             class_names.append(os.path.splitext(img_name)[0])
 
-def find_encodings(images):
+def find_encodings(imgs):
     encode_list = []
-    for img in images:
+    for img in imgs:
         try:
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            encodes = face_recognition.face_encodings(img)
+            rgb_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            encodes = face_recognition.face_encodings(rgb_img)
             if len(encodes) > 0:
                 encode_list.append(encodes[0])
         except Exception as e:
@@ -45,11 +49,12 @@ def find_encodings(images):
 
 encode_list_known = find_encodings(images)
 
+# Attendance File Utilities
 def get_attendance_filename():
     folder_path = os.path.join('static', 'Attendance Logs')
     if not os.path.exists(folder_path):
         os.makedirs(folder_path)
-    today_date = datetime.now().strftime('%d-%m-%Y')
+    today_date = datetime.now(IST).strftime('%d-%m-%Y')
     return os.path.join(folder_path, f'Attendance_{today_date}.csv')
 
 def is_already_registered_this_hour(name):
@@ -59,8 +64,8 @@ def is_already_registered_this_hour(name):
 
     with open(file_name, 'r') as f:
         data_list = f.readlines()
-        today_date = datetime.now().strftime('%d/%m/%Y')
-        current_hour = datetime.now().strftime('%H')
+        today_date = datetime.now(IST).strftime('%d/%m/%Y')
+        current_hour = datetime.now(IST).strftime('%H')
 
         for line in data_list:
             parts = line.strip().split(',')
@@ -81,12 +86,13 @@ def mark_attendance(name):
         return False
 
     with open(file_name, 'a') as f:
-        time_now = datetime.now()
+        time_now = datetime.now(IST)
         t_string = time_now.strftime('%H:%M:%S')
         d_string = time_now.strftime('%d/%m/%Y')
         f.writelines(f'{name},{t_string},{d_string}\n')
         return True
 
+# User Model
 class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(80), unique=True, nullable=False)
@@ -96,6 +102,7 @@ class User(db.Model):
 def is_logged_in():
     return 'username' in session
 
+# Routes
 @app.route('/')
 def welcome():
     return render_template('welcome.html')
@@ -142,46 +149,54 @@ def view_log(log_file):
 
 @app.route('/process_frame', methods=['POST'])
 def process_frame():
-    # Enforce time restriction
-    current_hour = datetime.now().hour
-    if current_hour < 9 or current_hour > 17:
-        return jsonify({'status': 'error', 'message': 'Attendance allowed only between 9 AM and 5 PM.'})
+    now_ist = datetime.now(IST)
+    if now_ist.hour < 9 or now_ist.hour > 17:
+        return jsonify({'status': 'error', 'message': 'Attendance is only allowed between 9:00 AM and 5:00 PM IST.'})
 
     data = request.get_json()
     if not data or 'image' not in data:
         return jsonify({'status': 'error', 'message': 'No image data'}), 400
 
-    # Decode base64 image from browser
+    # Decode base64 frame
     encoded_data = data['image'].split(',')[1]
     nparr = np.frombuffer(base64.b64decode(encoded_data), np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
-    # Downscale for performance
+    # Downscale frame for quick detection
     img_small = cv2.resize(img, (0, 0), fx=0.25, fy=0.25)
     img_rgb = cv2.cvtColor(img_small, cv2.COLOR_BGR2RGB)
 
     faces = face_recognition.face_locations(img_rgb)
     encodings = face_recognition.face_encodings(img_rgb, faces)
 
+    detections = []
     recognized_person = None
     marked = False
 
-    for encode_face in encodings:
-        if len(encode_list_known) == 0:
-            break
-        matches = face_recognition.compare_faces(encode_list_known, encode_face)
-        face_distances = face_recognition.face_distance(encode_list_known, encode_face)
-        match_index = np.argmin(face_distances)
+    for encode_face, face_loc in zip(encodings, faces):
+        name = "UNKNOWN"
+        if len(encode_list_known) > 0:
+            matches = face_recognition.compare_faces(encode_list_known, encode_face)
+            face_distances = face_recognition.face_distance(encode_list_known, encode_face)
+            match_index = np.argmin(face_distances)
 
-        if matches[match_index]:
-            recognized_person = class_names[match_index].upper()
-            if not is_already_registered_this_hour(recognized_person):
-                marked = mark_attendance(recognized_person)
-            break
+            if matches[match_index]:
+                name = class_names[match_index].upper()
+                recognized_person = name
+                if not is_already_registered_this_hour(name):
+                    marked = mark_attendance(name)
+
+        # Scale coordinates back up to video element size (* 4)
+        top, right, bottom, left = [v * 4 for v in face_loc]
+        detections.append({
+            'box': [top, right, bottom, left],
+            'name': name
+        })
 
     return jsonify({
         'status': 'success',
         'name': recognized_person if recognized_person else 'No person detected',
+        'detections': detections,
         'marked': marked
     })
 
