@@ -164,7 +164,6 @@ def mark_attendance(name):
     d_string = now.strftime('%d/%m/%Y')
     current_hour = now.strftime('%H')
 
-    # Check if marked this hour
     recent = AttendanceRecord.query.filter_by(name=name, date=d_string).all()
     for rec in recent:
         if rec.time.split(':')[0] == current_hour:
@@ -217,10 +216,16 @@ def authenticate():
         if not role or not username or not password:
             flash("All fields are required.", "danger")
             return redirect(url_for('authenticate'))
-        user = User.query.filter_by(username=username, role=role).first()
+        
+        # Case-insensitive role comparison for smooth login
+        user = User.query.filter(
+            User.username == username,
+            db.func.lower(User.role) == role.lower()
+        ).first()
+
         if user and bcrypt.check_password_hash(user.password, password):
-            session['username'] = username
-            session['role'] = role
+            session['username'] = user.username
+            session['role'] = user.role
             session.permanent = True
             flash("Login successful!", "success")
             return redirect(url_for('dashboard'))
@@ -234,7 +239,6 @@ def dashboard():
         flash("Please log in first.", "warning")
         return redirect(url_for('authenticate'))
 
-    # Gather distinct dates recorded in the database
     att_dates = [r[0] for r in db.session.query(AttendanceRecord.date).distinct().all()]
     spf_dates = [r[0] for r in db.session.query(SpoofRecord.date).distinct().all()]
 
@@ -375,8 +379,40 @@ def logout():
     flash("Logged out successfully.", "info")
     return redirect(url_for('authenticate'))
 
+# Database initialization and default user seeding
 with app.app_context():
     db.create_all()
+
+    # 1. Seed Teacher (Guru)
+    teacher = User.query.filter_by(username='Guru').first()
+    if not teacher:
+        hashed_teacher_pw = bcrypt.generate_password_hash('1234').decode('utf-8')
+        seed_teacher = User(
+            username='Guru',
+            password=hashed_teacher_pw,
+            role='Teacher'
+        )
+        db.session.add(seed_teacher)
+    else:
+        teacher.password = bcrypt.generate_password_hash('1234').decode('utf-8')
+        teacher.role = 'Teacher'
+
+    # 2. Seed Student (Dilip DK)
+    student = User.query.filter_by(username='Dilip DK').first()
+    if not student:
+        hashed_student_pw = bcrypt.generate_password_hash('demonking').decode('utf-8')
+        seed_student = User(
+            username='Dilip DK',
+            password=hashed_student_pw,
+            role='Student'
+        )
+        db.session.add(seed_student)
+    else:
+        student.password = bcrypt.generate_password_hash('demonking').decode('utf-8')
+        student.role = 'Student'
+
+    db.session.commit()
+    print("[DATABASE] Verified user credentials for Guru (Teacher) and Dilip DK (Student).")
 
 if __name__ == '__main__':
     app.run(debug=True)
