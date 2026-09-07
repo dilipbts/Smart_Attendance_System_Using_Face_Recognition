@@ -3,7 +3,6 @@ FROM python:3.11-slim
 ENV TZ="Asia/Kolkata"
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install tzdata, curl, and libpq for PostgreSQL support
 RUN apt-get update && apt-get install -y --no-install-recommends \
     tzdata \
     curl \
@@ -15,7 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Download verified YuNet and SFace models
+# Pull verified YuNet & SFace models
 RUN curl -fL -o face_detection_yunet_2023mar.onnx \
     https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx && \
     curl -fL -o face_recognition_sface_2021dec.onnx \
