@@ -29,7 +29,7 @@
                     video: { width: { ideal: 480 }, height: { ideal: 360 } } 
                 });
                 video.srcObject = stream;
-                statusEl.textContent = "Webcam active. Stand still for 3-second verification...";
+                statusEl.textContent = "Webcam active. Stand still for 3-second neural verification...";
                 statusEl.style.color = "#FFD700";
                 isScanning = true;
                 
@@ -69,7 +69,6 @@
                 await sendFrameToBackend();
             }
 
-            // Stream frames at ~400ms intervals so the 3-second buffer collects 7-8 samples
             setTimeout(() => {
                 if (isScanning) requestAnimationFrame(processingLoop);
             }, 400);
@@ -133,7 +132,6 @@
                             const width = right - left;
                             const height = bottom - top;
 
-                            // Uses the dynamic state color from backend: Yellow (Verifying), Green (Live), Red (Fraud)
                             const boxColor = det.color || '#00FF00';
 
                             overlayCtx.strokeStyle = boxColor;
