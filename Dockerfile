@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Pull verified YuNet & SFace models
+# Download YuNet and SFace models during build
 RUN curl -fL -o face_detection_yunet_2023mar.onnx \
     https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx && \
     curl -fL -o face_recognition_sface_2021dec.onnx \
@@ -23,6 +23,7 @@ RUN curl -fL -o face_detection_yunet_2023mar.onnx \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Copies app.py, 2.7_80x80_MiniFASNetV2.onnx, templates, and Images_Attendance
 COPY . .
 
 ENV PORT=10000
