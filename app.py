@@ -17,7 +17,7 @@ import numpy as np
 app = Flask(__name__)
 app.secret_key = os.getenv('FLASK_SECRET_KEY', 'default_attendance_secret_key')
 
-# Read PostgreSQL URL or fallback to SQLite
+# Database configuration
 db_url = os.getenv('DATABASE_URL', 'sqlite:///attendance_users.db')
 if db_url.startswith("postgres://"):
     db_url = db_url.replace("postgres://", "postgresql://", 1)
@@ -32,10 +32,12 @@ db = SQLAlchemy(app)
 # Indian Standard Time (IST)
 IST = ZoneInfo("Asia/Kolkata")
 
-# Path to ONNX Models
+# Local Model Paths
 YUNET_MODEL = os.path.join(os.getcwd(), 'face_detection_yunet_2023mar.onnx')
 SFACE_MODEL = os.path.join(os.getcwd(), 'face_recognition_sface_2021dec.onnx')
+FAS_MODEL = os.path.join(os.getcwd(), '2.7_80x80_MiniFASNetV2.onnx')
 
+# Ensure YuNet and SFace are present
 if not os.path.exists(YUNET_MODEL):
     urllib.request.urlretrieve(
         "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx",
@@ -48,7 +50,7 @@ if not os.path.exists(SFACE_MODEL):
         SFACE_MODEL
     )
 
-# Models
+# Load Face Detection and Recognition Models
 detector = cv2.FaceDetectorYN.create(
     model=YUNET_MODEL,
     config='',
@@ -63,22 +65,56 @@ recognizer = cv2.FaceRecognizerSF.create(
     config=''
 )
 
+# Load Local MiniFASNetV2 ONNX Model Directly
+if not os.path.exists(FAS_MODEL):
+    raise FileNotFoundError(f"Anti-spoofing model file '{FAS_MODEL}' not found in the project root.")
+
+fas_net = cv2.dnn.readNetFromONNX(FAS_MODEL)
+
 # Active Verification Cache
 active_trackers = defaultdict(dict)
 
-def evaluate_3s_motion(samples):
+def check_anti_spoof_dl(img_bgr, face_box):
     """
-    Checks landmark micro-variance and natural tremor over the 3-second buffer.
-    Photos, prints, and phone screens maintain near-zero variance.
+    MiniFASNet-V2 inference on 2.7 scale crop (80x80).
+    Official Minivision output index mapping:
+      - Index 0: Fake / Spoof
+      - Index 1: Real / Live Face
+      - Index 2: Fake / Spoof
     """
-    if len(samples) < 5:
-        return False
+    fx, fy, fw, fh = face_box
+    h, w, _ = img_bgr.shape
 
-    arr = np.array(samples)  # Shape: (N, 10)
-    variance_sum = np.sum(np.var(arr, axis=0))
+    # MiniFASNet 2.7x scale expansion for boundary and context detection
+    scale = 2.7
+    cx = fx + fw / 2.0
+    cy = fy + fh / 2.0
+    new_w = fw * scale
+    new_h = fh * scale
 
-    # Threshold for real human micro-movements vs flat rigid displays
-    return bool(variance_sum > 0.00014)
+    x1 = int(max(0, cx - new_w / 2.0))
+    y1 = int(max(0, cy - new_h / 2.0))
+    x2 = int(min(w, cx + new_w / 2.0))
+    y2 = int(min(h, cy + new_h / 2.0))
+
+    crop = img_bgr[y1:y2, x1:x2]
+    if crop.size == 0 or crop.shape[0] < 20 or crop.shape[1] < 20:
+        return False, 0.0
+
+    crop_resized = cv2.resize(crop, (80, 80))
+    blob = cv2.dnn.blobFromImage(crop_resized, scalefactor=1.0, size=(80, 80), mean=(0, 0, 0), swapRB=False)
+    fas_net.setInput(blob)
+    preds = fas_net.forward()  # Shape: (1, 3)
+
+    # Softmax probabilities
+    exp_preds = np.exp(preds[0] - np.max(preds[0]))
+    probs = exp_preds / np.sum(exp_preds)
+
+    # Index 1 = Real Living Face
+    real_confidence = float(probs[1])
+    is_live = bool(real_confidence >= 0.65)
+
+    return is_live, real_confidence
 
 # Database Models
 class User(db.Model):
@@ -110,11 +146,11 @@ known_features = []
 class_names = []
 
 def extract_feature_from_image(img_bgr):
-    h, w, _ = img_bgr.shape
-    detector.setInputSize((w, h))
-    _, faces = detector.detect(img_bgr)
+    img_safe = cv2.resize(img_bgr, (320, 320))
+    detector.setInputSize((320, 320))
+    _, faces = detector.detect(img_safe)
     if faces is not None and len(faces) > 0:
-        aligned_face = recognizer.alignCrop(img_bgr, faces[0])
+        aligned_face = recognizer.alignCrop(img_safe, faces[0])
         return recognizer.feature(aligned_face)
     return None
 
@@ -311,10 +347,9 @@ def process_frame():
 
         primary_name = person_name
 
-        # 2. Normalized 5-point facial landmarks calculation (Broadcasting Fix)
+        # 2. Extract Bounding Box & Run MiniFASNetV2 DL Inference
         fx, fy, fw, fh = face[0:4].astype(int)
-        raw_landmarks = face[4:14].reshape((5, 2)).astype(float)
-        norm_landmarks = ((raw_landmarks - [fx, fy]) / [max(fw, 1), max(fh, 1)]).flatten()
+        _, real_confidence = check_anti_spoof_dl(img, (fx, fy, fw, fh))
 
         # 3. 3-Second Temporal Verification Buffer
         tracker = active_trackers[person_name]
@@ -324,26 +359,27 @@ def process_frame():
 
         if "start_time" not in tracker:
             tracker["start_time"] = current_time
-            tracker["samples"] = []
+            tracker["scores"] = []
             tracker["triggered"] = False
             tracker["status"] = "ANALYZING"
 
         tracker["last_seen"] = current_time
-        tracker["samples"].append(norm_landmarks)
+        tracker["scores"].append(real_confidence)
 
         elapsed = current_time - tracker["start_time"]
 
-        # Phase 1: Under 3.0 seconds -> Do not write to database
+        # Phase 1: Under 3.0 seconds -> Collect and buffer frame inferences
         if elapsed < 3.0 and not tracker["triggered"]:
             remaining = max(1, 3 - int(elapsed))
             display_tag = f"{person_name} (Verifying: {remaining}s)"
             box_color = '#FFD700'
-            action_status = f"Face detected: Verifying liveness ({remaining}s remaining)..."
+            action_status = f"Face detected: Running MiniFASNet neural analysis ({remaining}s remaining)..."
 
-        # Phase 2: At or after 3.0 seconds -> Trigger database write once
+        # Phase 2: At or after 3.0 seconds -> Commit verification
         else:
             if not tracker["triggered"]:
-                is_live = evaluate_3s_motion(tracker["samples"])
+                avg_real_score = np.mean(tracker["scores"])
+                is_live = bool(avg_real_score >= 0.65)
                 tracker["triggered"] = True
 
                 if is_live:
