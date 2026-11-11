@@ -37,18 +37,29 @@ YUNET_MODEL = os.path.join(os.getcwd(), 'face_detection_yunet_2023mar.onnx')
 SFACE_MODEL = os.path.join(os.getcwd(), 'face_recognition_sface_2021dec.onnx')
 FAS_MODEL = os.path.join(os.getcwd(), '2.7_80x80_MiniFASNetV2.onnx')
 
-# Ensure YuNet and SFace are present
-if not os.path.exists(YUNET_MODEL):
-    urllib.request.urlretrieve(
-        "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx",
-        YUNET_MODEL
-    )
+def download_model_if_missing(model_path, url):
+    if not os.path.exists(model_path) or os.path.getsize(model_path) < 100 * 1024:
+        print(f"Downloading {os.path.basename(model_path)}...")
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req) as resp, open(model_path, 'wb') as out_file:
+            out_file.write(resp.read())
+        print(f"Successfully downloaded {os.path.basename(model_path)}")
 
-if not os.path.exists(SFACE_MODEL):
-    urllib.request.urlretrieve(
-        "https://github.com/opencv/opencv_zoo/raw/main/models/face_recognition_sface/face_recognition_sface_2021dec.onnx",
-        SFACE_MODEL
-    )
+# Automatic download guards for container cold boots
+download_model_if_missing(
+    YUNET_MODEL,
+    "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx"
+)
+
+download_model_if_missing(
+    SFACE_MODEL,
+    "https://github.com/opencv/opencv_zoo/raw/main/models/face_recognition_sface/face_recognition_sface_2021dec.onnx"
+)
+
+download_model_if_missing(
+    FAS_MODEL,
+    "https://huggingface.co/garciafido/minifasnet-v2-anti-spoofing-onnx/resolve/main/minifasnet_v2.onnx"
+)
 
 # Load Face Detection and Recognition Models
 detector = cv2.FaceDetectorYN.create(
@@ -65,10 +76,7 @@ recognizer = cv2.FaceRecognizerSF.create(
     config=''
 )
 
-# Load Local MiniFASNetV2 ONNX Model Directly
-if not os.path.exists(FAS_MODEL):
-    raise FileNotFoundError(f"Anti-spoofing model file '{FAS_MODEL}' not found in the project root.")
-
+# Load MiniFASNetV2 ONNX Model
 fas_net = cv2.dnn.readNetFromONNX(FAS_MODEL)
 
 # Active Verification Cache
@@ -77,7 +85,7 @@ active_trackers = defaultdict(dict)
 def check_anti_spoof_dl(img_bgr, face_box):
     """
     MiniFASNet-V2 inference on 2.7 scale crop (80x80).
-    Official Minivision output index mapping:
+    Minivision output index mapping:
       - Index 0: Fake / Spoof
       - Index 1: Real / Live Face
       - Index 2: Fake / Spoof
@@ -85,7 +93,7 @@ def check_anti_spoof_dl(img_bgr, face_box):
     fx, fy, fw, fh = face_box
     h, w, _ = img_bgr.shape
 
-    # MiniFASNet 2.7x scale expansion for boundary and context detection
+    # 2.7x bounding box expansion to evaluate background & screen borders
     scale = 2.7
     cx = fx + fw / 2.0
     cy = fy + fh / 2.0
@@ -104,13 +112,13 @@ def check_anti_spoof_dl(img_bgr, face_box):
     crop_resized = cv2.resize(crop, (80, 80))
     blob = cv2.dnn.blobFromImage(crop_resized, scalefactor=1.0, size=(80, 80), mean=(0, 0, 0), swapRB=False)
     fas_net.setInput(blob)
-    preds = fas_net.forward()  # Shape: (1, 3)
+    preds = fas_net.forward()
 
     # Softmax probabilities
     exp_preds = np.exp(preds[0] - np.max(preds[0]))
     probs = exp_preds / np.sum(exp_preds)
 
-    # Index 1 = Real Living Face
+    # Index 1 = Real human face
     real_confidence = float(probs[1])
     is_live = bool(real_confidence >= 0.65)
 
@@ -207,6 +215,11 @@ def record_spoof_attempt(name):
 
 def is_logged_in():
     return 'username' in session
+
+# Health Check Endpoint for Render Keep-Alive & Monitoring
+@app.route('/healthz')
+def healthz():
+    return jsonify({'status': 'healthy', 'timestamp': time.time()}), 200
 
 # Routes
 @app.route('/')
@@ -425,27 +438,32 @@ def logout():
     flash("Logged out successfully.", "info")
     return redirect(url_for('authenticate'))
 
-# Seed Default Users
+# Resilient Database Initialization
 with app.app_context():
-    db.create_all()
+    try:
+        db.create_all()
 
-    teacher = User.query.filter_by(username='Guru').first()
-    if not teacher:
-        hashed_teacher_pw = bcrypt.generate_password_hash('1234').decode('utf-8')
-        db.session.add(User(username='Guru', password=hashed_teacher_pw, role='Teacher'))
-    else:
-        teacher.password = bcrypt.generate_password_hash('1234').decode('utf-8')
-        teacher.role = 'Teacher'
+        teacher = User.query.filter_by(username='Guru').first()
+        if not teacher:
+            hashed_teacher_pw = bcrypt.generate_password_hash('1234').decode('utf-8')
+            db.session.add(User(username='Guru', password=hashed_teacher_pw, role='Teacher'))
+        else:
+            teacher.password = bcrypt.generate_password_hash('1234').decode('utf-8')
+            teacher.role = 'Teacher'
 
-    student = User.query.filter_by(username='Dilip DK').first()
-    if not student:
-        hashed_student_pw = bcrypt.generate_password_hash('demonking').decode('utf-8')
-        db.session.add(User(username='Dilip DK', password=hashed_student_pw, role='Student'))
-    else:
-        student.password = bcrypt.generate_password_hash('demonking').decode('utf-8')
-        student.role = 'Student'
+        student = User.query.filter_by(username='Dilip DK').first()
+        if not student:
+            hashed_student_pw = bcrypt.generate_password_hash('demonking').decode('utf-8')
+            db.session.add(User(username='Dilip DK', password=hashed_student_pw, role='Student'))
+        else:
+            student.password = bcrypt.generate_password_hash('demonking').decode('utf-8')
+            student.role = 'Student'
 
-    db.session.commit()
+        db.session.commit()
+        print("Database schemas and seed users initialized successfully.")
+    except Exception as e:
+        print(f"Database setup delayed or encountered an error: {e}")
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=False)
