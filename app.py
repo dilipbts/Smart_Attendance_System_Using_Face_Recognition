@@ -17,14 +17,33 @@ import numpy as np
 app = Flask(__name__)
 app.secret_key = os.getenv('FLASK_SECRET_KEY', 'default_attendance_secret_key')
 
-# Database configuration
+# Production Cookie Security
+app.config.update(
+    SESSION_COOKIE_SECURE=True,     # Enforce HTTPS-only cookie transmission
+    SESSION_COOKIE_HTTPONLY=True,   # Mitigate XSS attacks by disallowing JS access
+    SESSION_COOKIE_SAMESITE='Lax',  # Protect against CSRF
+)
+
+# Database Configuration with Dynamic Driver Normalization
 db_url = os.getenv('DATABASE_URL', 'sqlite:///attendance_users.db')
 if db_url.startswith("postgres://"):
-    db_url = db_url.replace("postgres://", "postgresql://", 1)
+    db_url = db_url.replace("postgres://", "postgresql+psycopg2://", 1)
+elif db_url.startswith("postgresql://") and not db_url.startswith("postgresql+"):
+    db_url = db_url.replace("postgresql://", "postgresql+psycopg2://", 1)
 
 app.config['SQLALCHEMY_DATABASE_URI'] = db_url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.permanent_session_lifetime = timedelta(minutes=30)
+
+# Resilient Neon Pooling & Auto-Wake Handling
+app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
+    'pool_pre_ping': True,          # Ping DB before running queries; auto-reconnects on dropped connections
+    'pool_recycle': 280,            # Cycle connections before server-side idle timeouts
+    'pool_timeout': 30,             # Wait up to 30s while Neon cold boots from sleep
+    'connect_args': {
+        'connect_timeout': 10       # Socket connection timeout
+    }
+}
 
 bcrypt = Bcrypt(app)
 db = SQLAlchemy(app)
@@ -216,7 +235,7 @@ def record_spoof_attempt(name):
 def is_logged_in():
     return 'username' in session
 
-# Health Check Endpoint for Render Keep-Alive & Monitoring
+# Health Check Endpoint for Render Keep-Alive / UptimeRobot
 @app.route('/healthz')
 def healthz():
     return jsonify({'status': 'healthy', 'timestamp': time.time()}), 200
@@ -438,7 +457,7 @@ def logout():
     flash("Logged out successfully.", "info")
     return redirect(url_for('authenticate'))
 
-# Resilient Database Initialization
+# Resilient Database Initialization with SQLite Fallback Protection
 with app.app_context():
     try:
         db.create_all()
@@ -462,7 +481,23 @@ with app.app_context():
         db.session.commit()
         print("Database schemas and seed users initialized successfully.")
     except Exception as e:
-        print(f"Database setup delayed or encountered an error: {e}")
+        print(f"PostgreSQL connection failed ({e}). Falling back to local SQLite database.")
+        app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///attendance_users.db'
+        db.engine.dispose()
+        db.create_all()
+
+        teacher = User.query.filter_by(username='Guru').first()
+        if not teacher:
+            hashed_teacher_pw = bcrypt.generate_password_hash('1234').decode('utf-8')
+            db.session.add(User(username='Guru', password=hashed_teacher_pw, role='Teacher'))
+
+        student = User.query.filter_by(username='Dilip DK').first()
+        if not student:
+            hashed_student_pw = bcrypt.generate_password_hash('demonking').decode('utf-8')
+            db.session.add(User(username='Dilip DK', password=hashed_student_pw, role='Student'))
+
+        db.session.commit()
+        print("SQLite fallback initialized successfully.")
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
