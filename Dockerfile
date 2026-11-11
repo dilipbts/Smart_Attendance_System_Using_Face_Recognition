@@ -29,4 +29,5 @@ COPY . .
 ENV PORT=10000
 EXPOSE 10000
 
-CMD ["sh", "-c", "gunicorn --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 120 app:app"]
+# Replace the last line of your Dockerfile with this:
+CMD ["sh", "-c", "gunicorn --workers=1 --threads=4 --timeout 180 --bind 0.0.0.0:${PORT:-5000} app:app"]
